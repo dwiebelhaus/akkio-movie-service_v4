@@ -10,7 +10,7 @@ def row(**overrides) -> dict[str, str]:
 def test_parses_a_full_row():
     movie = Movie.from_csv_row(row())
     assert movie == Movie("Glass Onion", 2022, ("Comedy", "Crime", "Drama"), 7.2)
-    assert movie.genre_key == "Comedy|Crime|Drama"
+    assert movie.genre_key == "comedy|crime|drama"
     assert movie.title_key == "glass onion"
 
 
@@ -36,6 +36,37 @@ def test_title_whitespace_is_collapsed_and_key_case_folded():
     movie = Movie.from_csv_row(row(movie_name="  The   STRANGER "))
     assert movie.movie_name == "The STRANGER"
     assert movie.title_key == "the stranger"
+
+
+def test_genres_match_case_insensitively_keeping_first_spelling():
+    movie = Movie.from_csv_row(row(genres="sci-fi, Drama, SCI-FI, drama, Action"))
+    assert movie.genres == ("Action", "Drama", "sci-fi")
+    assert movie.genre_key == "action|drama|sci-fi"
+    assert movie.genre_key == Movie.from_csv_row(row(genres="Sci-Fi,DRAMA,action")).genre_key
+
+
+def test_title_is_unicode_normalized():
+    composed = Movie.from_csv_row(row(movie_name="Am\u00e9lie"))
+    decomposed = Movie.from_csv_row(row(movie_name="Ame\u0301lie"))
+    assert decomposed.movie_name == composed.movie_name == "Am\u00e9lie"
+    assert decomposed.title_key == composed.title_key == "am\u00e9lie"
+
+
+def test_invisible_and_control_characters_are_removed():
+    movie = Movie.from_csv_row(row(movie_name="\ufeffThe\u200b Matrix\x07", genres="Sci\u200b-Fi, \u00a0Action"))
+    assert movie.movie_name == "The Matrix"
+    assert movie.genres == ("Action", "Sci-Fi")
+
+
+def test_unusual_whitespace_is_collapsed():
+    movie = Movie.from_csv_row(row(movie_name="Glass\u00a0\u2003Onion\t"))
+    assert movie.movie_name == "Glass Onion"
+    assert movie.title_key == "glass onion"
+
+
+def test_title_with_only_invisible_characters_is_missing():
+    with pytest.raises(ValueError, match="^missing movie_name$"):
+        Movie.from_csv_row(row(movie_name="\u200b\ufeff"))
 
 
 def test_rating_is_rounded_to_one_decimal():

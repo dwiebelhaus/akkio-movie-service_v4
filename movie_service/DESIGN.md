@@ -89,9 +89,9 @@ Normalized (3NF), snake_case, plural table names.
 movies (
   id            bigint generated always as identity primary key,
   title         text        not null,
-  title_key     text collate "C" not null,  -- normalized title: case-folded, whitespace collapsed
+  title_key     text collate "C" not null,  -- name key of the title (§5)
   year          smallint,               -- null = unknown
-  genre_key     text collate "C" not null,  -- sorted genre names joined with '|' (dedup only)
+  genre_key     text collate "C" not null,  -- sorted genre keys joined with '|' (dedup only)
   rating        numeric(3,1),           -- null = unrated
   first_import_id bigint,               -- audit: import that created the row (no FK, D14)
   last_import_id  bigint,               -- audit: last import that changed the rating
@@ -101,7 +101,8 @@ movies (
 
 genres (
   id    smallint generated always as identity primary key,
-  name  text not null unique
+  name  text not null,                        -- display spelling: the first one imported
+  key   text collate "C" not null unique      -- name key (§5)
 )
 
 movie_genres (
@@ -137,7 +138,9 @@ The identity keys use the `"C"` collation (byte-wise comparison): they are never
 
 **Identity key:** `(title_key, year, genre_key)`.
 
-- Exact duplicates collapse to one row.
+**Name normalization:** titles and genre names are cleaned on import: Unicode NFC, control and invisible format characters (zero-width spaces, BOMs) removed, whitespace trimmed and collapsed. Their *name key* is the cleaned name case-folded. Titles keep their cleaned spelling for display. Genres are identified by key, so `sci-fi` and `SCI-FI` link to the existing `Sci-Fi`; a new genre keeps the first spelling seen. Genre filters match by key too.
+
+- Exact duplicates collapse to one row, as do rows that differ only in title case, whitespace, Unicode form or genre case.
 - Same title and year with different genres stay separate films (e.g. the two *The Stranger* 2022 entries).
 - Missing years count as equal for matching (`NULLS NOT DISTINCT`, Postgres 15+).
 
