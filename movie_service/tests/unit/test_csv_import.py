@@ -96,4 +96,4 @@ def test_reader_requires_header():
 def test_copy_encoding_escapes_and_nulls():
     text = 'movie_name,year,genres,rating\n"Tab\\there",,"Drama",\n'
     (batch,) = read_all(reader(text))
-    assert encode_copy_rows(batch) == b"2\tTab\\\\there\ttab\\\\there\t\\N\tDrama\t\\N\n"
+    assert encode_copy_rows(batch) == b"2\tTab\\\\there\ttab\\\\there\t\\N\tdrama\tDrama\t\\N\n"

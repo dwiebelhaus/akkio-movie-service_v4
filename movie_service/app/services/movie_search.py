@@ -12,6 +12,7 @@ import binascii
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from app.domain import name_key
 from app.errors import ApiError
 from app.schemas import MovieFilter
 
@@ -39,7 +40,7 @@ class GenreCatalog:
             async with pool.connection() as conn:
                 cur = await conn.execute("select id, name from genres order by name")
                 rows = await cur.fetchall()
-            self._by_name = {name.casefold(): gid for gid, name in rows}
+            self._by_name = {name_key(name): gid for gid, name in rows}
             self._names = [name for _, name in rows]
             self._version = version
 
@@ -50,10 +51,10 @@ class GenreCatalog:
 
     async def resolve(self, pool: AsyncConnectionPool, names: list[str], version: int) -> list[int]:
         await self._load(pool, version)
-        unknown = sorted({n for n in names if n.strip().casefold() not in self._by_name})
+        unknown = sorted({n for n in names if name_key(n) not in self._by_name})
         if unknown:
             raise ApiError(422, "unknown_genre", f"Unknown genre(s): {', '.join(unknown)}", {"unknown": unknown})
-        return sorted({self._by_name[n.strip().casefold()] for n in names})
+        return sorted({self._by_name[name_key(n)] for n in names})
 
 
 def encode_cursor(movie_id: int) -> str:

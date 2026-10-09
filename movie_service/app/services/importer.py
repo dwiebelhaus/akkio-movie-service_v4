@@ -31,30 +31,36 @@ create temp table import_rows (
     title_key  text collate "C" not null,
     year       smallint,
     genre_key  text collate "C" not null,
+    genres     text         not null,  -- display names, aligned with genre_key
     rating     numeric(3,1)
 ) on commit drop
 """
 
-_COPY_STAGING = "copy import_rows (line_no, title, title_key, year, genre_key, rating) from stdin"
+_COPY_STAGING = "copy import_rows (line_no, title, title_key, year, genre_key, genres, rating) from stdin"
 
-# Collapse duplicates within the file: last title spelling, last non-null rating.
+# Collapse duplicates within the file: last title spelling, first genre spellings, last
+# non-null rating.
 _COLLAPSE = """
 create temp table import_movies on commit drop as
 select title_key, year, genre_key,
        (array_agg(title order by line_no desc))[1] as title,
+       (array_agg(genres order by line_no))[1] as genres,
        (array_agg(rating order by line_no desc) filter (where rating is not null))[1] as rating,
        min(line_no) as first_line
   from import_rows
  group by title_key, year, genre_key
 """
 
+# Genres match by key (case-insensitive); a new genre takes its first spelling in the file.
 _INSERT_NEW_GENRES = """
-insert into genres (name)
-select distinct gn.name
-  from (select distinct genre_key from import_movies) k
- cross join lateral unnest(string_to_array(k.genre_key, '|')) as gn(name)
- where not exists (select 1 from genres g where g.name = gn.name)
-on conflict (name) do nothing
+insert into genres (key, name)
+select distinct on (gn.key) gn.key, gn.name
+  from import_movies b
+ cross join lateral unnest(string_to_array(b.genre_key, '|'),
+                           string_to_array(b.genres, '|')) as gn(key, name)
+ where not exists (select 1 from genres g where g.key = gn.key)
+ order by gn.key, b.first_line
+on conflict (key) do nothing
 """
 
 # Merges run under IMPORT_LOCK_ID, so plain UPDATE + INSERT ... WHERE NOT EXISTS is safe and
@@ -93,8 +99,8 @@ _GENRE_SETS = """
 create temp table import_genre_sets on commit drop as
 select k.genre_key, array_agg(g.id) as genre_ids
   from (select distinct genre_key from import_movies) k
- cross join lateral unnest(string_to_array(k.genre_key, '|')) as gn(name)
-  join genres g on g.name = gn.name
+ cross join lateral unnest(string_to_array(k.genre_key, '|')) as gn(key)
+  join genres g on g.key = gn.key
  group by k.genre_key
 """
 
@@ -120,7 +126,9 @@ def _copy_field(value: object) -> str:
 def encode_copy_rows(batch: Batch) -> bytes:
     """Encode a batch in COPY text format, so it goes to Postgres in one write."""
     return "".join(
-        "\t".join(map(_copy_field, (line, m.movie_name, m.title_key, m.year, m.genre_key, m.rating)))
+        "\t".join(
+            map(_copy_field, (line, m.movie_name, m.title_key, m.year, m.genre_key, "|".join(m.genres), m.rating))
+        )
         + "\n"
         for line, m in batch.movies
     ).encode()

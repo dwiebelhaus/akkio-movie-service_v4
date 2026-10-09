@@ -64,6 +64,33 @@ def test_dedup_within_file_and_across_imports(client, auth_headers):
     assert again["unchanged"] == 3
 
 
+def test_names_are_normalized(client, auth_headers):
+    """Genres match case-insensitively (first spelling wins); titles are Unicode-normalized."""
+    p = unique_prefix()
+    genre = f"G{p.strip()}"
+    rows = [
+        [f"{p}Am\u00e9lie", "2001", f"{genre}, Comedy", "8.3"],
+        [f"{p}Ame\u0301lie\u200b", "2001", f"{genre.upper()},comedy", ""],  # duplicate
+        [f"{p}Other", "2001", genre.lower(), ""],
+    ]
+    result = import_and_wait(client, make_csv(rows), auth_headers)["result"]
+    assert result["inserted"] == 2
+    assert result["duplicates_in_file"] == 1
+
+    genres = client.get("/api/v1/genres").json()
+    assert genre in genres
+    assert genre.lower() not in genres and genre.upper() not in genres
+
+    # A later import in different case links to the existing genre.
+    later = import_and_wait(client, make_csv([[f"{p}Later", "2002", genre.upper(), ""]]), auth_headers)
+    assert later["result"]["inserted"] == 1
+    assert client.get("/api/v1/genres").json() == genres
+
+    items = client.get("/api/v1/movies", params={"genre": genre.lower()}).json()["items"]
+    assert sorted(m["title"] for m in items) == sorted([f"{p}Am\u00e9lie", f"{p}Other", f"{p}Later"])
+    assert all(genre in m["genres"] for m in items)
+
+
 def test_merge_latest_non_null_rating_wins(client, auth_headers, db):
     p = unique_prefix()
     import_and_wait(client, make_csv([[f"{p}Rated", "2021", "Comedy", "6.5"]]), auth_headers)
@@ -92,7 +119,7 @@ def test_bad_rows_are_skipped_and_reported(client, auth_headers):
             [f"{p}Out of range", "1999", "Drama", "11"],
             [f"{p}Too many", "1999", "Drama", "5.0", "extra"],
             [f"{p}No rating", "2000", "", ""],
-            [f"{p}Nul\x00byte", "2000", "Drama", "5.0"],
+            [f"{p}Nul rating", "2000", "Drama", "5\x00"],  # NUL must not fail the whole import
         ]
     )
     job = import_and_wait(client, content, auth_headers)
@@ -105,7 +132,7 @@ def test_bad_rows_are_skipped_and_reported(client, auth_headers):
     assert reasons[5].startswith("invalid year")
     assert reasons[6].startswith("rating out of range")
     assert reasons[7] == "expected 4 fields, got 5"
-    assert reasons[9] == "field contains a NUL byte"
+    assert reasons[9].startswith("invalid rating")
 
 
 def test_columns_in_any_order_and_extras_ignored(client, auth_headers):
