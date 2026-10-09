@@ -12,24 +12,59 @@
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 COMPOSE = ["docker", "compose", "--project-directory", str(ROOT)]
+PREFERRED_API_PORT = 8000
 
 
-def compose(*args: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+def compose(
+    *args: str, check: bool = True, capture: bool = False, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [*COMPOSE, *args], cwd=ROOT, check=check, text=True, capture_output=capture
+        [*COMPOSE, *args], cwd=ROOT, check=check, text=True, capture_output=capture, env=env
     )
 
 
-def api_url() -> str:
-    out = compose("port", "api", "8000", capture=True).stdout.strip()
+def published_api_port() -> int | None:
+    """Host port of the running API container, if any."""
+    out = compose("port", "api", "8000", check=False, capture=True).stdout.strip()
     port = out.rsplit(":", 1)[-1]
+    return int(port) if port.isdigit() and port != "0" else None
+
+
+def api_url() -> str:
+    port = published_api_port()
+    if port is None:
+        raise SystemExit("The API is not running; start it with `uv run python run.py up`.")
     return f"http://localhost:{port}"
+
+
+def port_is_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("0.0.0.0", port))
+        except OSError:
+            return False
+    return True
+
+
+def choose_api_port() -> str:
+    """API_PORT if set; else keep the running stack's port; else 8000, or the next free port."""
+    if configured := env_value("API_PORT", ""):
+        return configured
+    if (running := published_api_port()) is not None:
+        return str(running)
+    for port in range(PREFERRED_API_PORT, PREFERRED_API_PORT + 100):
+        if port_is_free(port):
+            if port != PREFERRED_API_PORT:
+                print(f"Port {PREFERRED_API_PORT} is in use; using {port} for the API.")
+            return str(port)
+    return "0"  # let Docker pick
 
 
 def env_value(name: str, default: str) -> str:
@@ -109,7 +144,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
-    compose("up", "-d", "--build", "--wait")
+    compose("up", "-d", "--build", "--wait", env={**os.environ, "API_PORT": choose_api_port()})
     url = api_url()
     print(f"\nMovie API is up: {url}  (docs: {url}/docs)")
     if args.seed and (code := seed(url, ROOT / "movies.csv")):
