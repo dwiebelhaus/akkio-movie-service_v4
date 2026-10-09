@@ -31,6 +31,10 @@ os.environ.update(
     JOB_SWEEP_INTERVAL_SECONDS="1",
     # Retry Redis quickly after an outage so the fail-open test can watch it recover.
     CACHE_RETRY_SECONDS="1",
+    # Small enough to hit the event-stream cap in a test.
+    MAX_EVENT_STREAMS="8",
+    # Notice a lost dataset-change notification within about a second.
+    DATASET_VERSION_REFRESH_SECONDS="1",
 )
 
 

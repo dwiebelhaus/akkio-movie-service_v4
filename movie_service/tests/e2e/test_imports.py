@@ -224,3 +224,51 @@ def test_oversized_chunked_upload_is_413(client, auth_headers):
         "/api/v1/imports", headers={**auth_headers, "Content-Type": "text/csv"}, content=chunks()
     )
     assert resp.status_code == 413
+
+
+_BOUNDARY = "e2e-boundary"
+
+
+def _multipart(*parts: tuple[str, bytes], chunk: int = 1024 * 1024):
+    """A chunked (no Content-Length) multipart body: `(headers, data)` parts, then the end."""
+    for headers, data in parts:
+        yield f"--{_BOUNDARY}\r\n{headers}\r\n\r\n".encode()
+        for i in range(0, len(data), chunk):
+            yield data[i : i + chunk]
+        yield b"\r\n"
+    yield f"--{_BOUNDARY}--\r\n".encode()
+
+
+def _post_multipart(client, auth_headers, *parts):
+    return client.post(
+        "/api/v1/imports",
+        headers={**auth_headers, "Content-Type": f"multipart/form-data; boundary={_BOUNDARY}"},
+        content=_multipart(*parts),
+    )
+
+
+def test_oversized_non_file_multipart_field_is_413(client, auth_headers):
+    """The size limit covers the whole body, not just the `file` part."""
+    junk = ('Content-Disposition: form-data; name="junk"', b"x" * (MAX_UPLOAD_BYTES + 1024 * 1024))
+    file = (
+        'Content-Disposition: form-data; name="file"; filename="m.csv"\r\nContent-Type: text/csv',
+        make_csv([["Tiny", "2000", "Drama", "5"]]),
+    )
+    resp = _post_multipart(client, auth_headers, junk, file)
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "payload_too_large"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        'Content-Disposition: form-data; name="file"; filename="m.csv"\r\nX-Junk: ' + "a" * 20_000,
+        'Content-Disposition: form-data; name="file"; filename="m.csv"'
+        + "".join(f"\r\nX-Junk-{i}: a" for i in range(100)),
+    ],
+    ids=["long-header", "many-headers"],
+)
+def test_oversized_multipart_part_headers_are_422(client, auth_headers, headers):
+    resp = _post_multipart(client, auth_headers, (headers, make_csv([["Tiny", "2000", "Drama", "5"]])))
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_multipart"

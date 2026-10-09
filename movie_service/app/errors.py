@@ -18,12 +18,15 @@ logger = logging.getLogger(__name__)
 class ApiError(Exception):
     """An expected failure that maps to a specific status code and error code."""
 
-    def __init__(self, status_code: int, code: str, message: str, details: Any = None):
+    def __init__(
+        self, status_code: int, code: str, message: str, details: Any = None, headers: dict | None = None
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.details = details
+        self.headers = headers
 
 
 def error_response(
@@ -34,7 +37,7 @@ def error_response(
 
 
 async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
-    return error_response(exc.status_code, exc.code, exc.message, exc.details)
+    return error_response(exc.status_code, exc.code, exc.message, exc.details, exc.headers)
 
 
 async def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:

@@ -194,7 +194,7 @@ Imports and exports always run as jobs, because their duration grows with the da
 
 1. The client calls `POST /imports` or `POST /exports` and gets `202` back immediately with a job ID.
 2. A worker claims the job and updates `progress` and `processed_rows` at most every ~250 ms or every N rows, issuing `NOTIFY job_progress, '<id>'` with each update.
-3. `GET /jobs/{id}/events` sends the current state immediately, then pushes an event on each notification, and closes after a final `succeeded` or `failed` event. Clients that can't use SSE poll `GET /jobs/{id}`.
+3. `GET /jobs/{id}/events` sends the current state immediately, then pushes an event on each notification, and closes after a final `succeeded` or `failed` event. Clients that can't use SSE poll `GET /jobs/{id}`. Each API process keeps one shared snapshot per watched job: a notification triggers one job read for all of that job's streams, not one per client. Open streams are capped per process (`MAX_EVENT_STREAMS`, default 1000); beyond that, `503` with `Retry-After`.
 
 Import progress is measured by bytes read divided by file size during staging, which works without counting rows first, then by chunks of genre links during the merge. The shares (25% staging, 10% movie insert, 65% links) roughly match measured time on a fresh database, so the bar moves steadily. Export progress is rows written divided by the movie count.
 
@@ -205,7 +205,7 @@ Search is synchronous. It is kept under 2 seconds with indexes, keyset paginatio
 ## 8. Import pipeline (R1)
 
 1. **Upload:** the API streams the request body to storage in chunks (constant memory) and checks the header row.
-   - **Size limit:** `MAX_UPLOAD_BYTES`, default **64 MB**. This is sized for about 750,000 movies: the sample averages 45 bytes per row (about 34 MB for 750k rows) and a 99th-percentile row is 81 bytes (about 61 MB). The limit is enforced while streaming, so an oversized upload is cut off early with `413` and the partial file is deleted.
+   - **Size limit:** `MAX_UPLOAD_BYTES`, default **64 MB**. This is sized for about 750,000 movies: the sample averages 45 bytes per row (about 34 MB for 750k rows) and a 99th-percentile row is 81 bytes (about 61 MB). The limit is enforced while streaming, so an oversized upload is cut off early with `413` and the partial file is deleted. For multipart uploads the cap covers the whole body (the file plus 64 KB of overhead), and part headers are capped too (8 KB each, 16 per part; `422` beyond that), so extra fields can't be used to stream unbounded data or grow memory.
    - **Header:** the required columns (`movie_name`, `year`, `genres`, `rating`) must be present, in any order; otherwise `422`. Extra columns are ignored and listed in `result.warnings`.
    - Then it creates a job and returns `202`.
 2. **Parse:** the worker reads the file with `csv.reader` in batches of about 10k rows and normalizes each row (`Movie.from_csv_row`). Bad rows (unparseable year or rating, missing title, wrong field count) are skipped: they are counted in `result.rejected`, and the first 100 are recorded with line numbers and reasons in `result.rejected_samples`. Bad rows never fail the job. Only file-level problems do (not a CSV, unreadable encoding, missing required columns).
@@ -278,7 +278,7 @@ Configuration comes from environment variables (`.env.example` provided), includ
 
 ## 13. Caching
 
-Everything keys on the **dataset version** (`dataset_state.version`). An import bumps it in its merge transaction, only when it inserted or updated rows, and issues `NOTIFY dataset_changed`. Each API replica keeps the current version in memory (loaded at startup, updated from the notification), so checking it costs no query.
+Everything keys on the **dataset version** (`dataset_state.version`). An import bumps it in its merge transaction, only when it inserted or updated rows, and issues `NOTIFY dataset_changed`. Each API replica keeps the current version in memory (loaded at startup, updated from the notification), so checking it costs no query. While the listener connection is down the in-memory version is dropped and requests read it from the database, and the listener re-reads it every `DATASET_VERSION_REFRESH_SECONDS` (default 5), so a lost notification can't leave caches stale for long.
 
 **HTTP (all clients, CDNs, proxies):**
 - `GET /movies` and `GET /movies/{id}` return `ETag: "v{version}-{hash of normalized query}"` and `Cache-Control: public, max-age=3600` (`CACHE_MAX_AGE_SECONDS`).

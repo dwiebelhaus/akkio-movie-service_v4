@@ -19,6 +19,13 @@ from app.services.storage import Storage
 
 FILE_FIELD = "file"
 MAX_HEADER_BYTES = 64 * 1024
+# Multipart overhead allowed on top of the file size limit: boundaries, part headers, and
+# any small extra fields.
+MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+# Longest name or value of a single part header (e.g. Content-Disposition), and the most
+# headers one part may have.
+MAX_PART_HEADER_BYTES = 8 * 1024
+MAX_PART_HEADERS = 16
 # After a 413, read and discard bodies up to this much over the limit so the client reliably
 # receives the response instead of a reset connection; anything larger is cut off.
 MAX_DRAIN_BYTES = 8 * 1024 * 1024
@@ -47,18 +54,29 @@ async def _drain(chunks: AsyncIterator[bytes], limit: int) -> None:
                 break
 
 
-async def _multipart_file_chunks(request: Request, boundary: bytes) -> AsyncIterator[bytes]:
-    """Yield the bytes of the `file` part from a streaming multipart body."""
+async def _multipart_file_chunks(request: Request, boundary: bytes, max_bytes: int) -> AsyncIterator[bytes]:
+    """Yield the bytes of the `file` part from a streaming multipart body.
+
+    The whole body is capped (the file limit plus some overhead), not just the file part, so
+    large or endless extra fields can't be streamed in, and part headers are capped too.
+    """
     pending: list[bytes] = []
     state = {"field": b"", "value": b"", "headers": {}, "in_file": False, "file_seen": False}
 
+    def bounded(current: bytes, more: bytes) -> bytes:
+        if len(current) + len(more) > MAX_PART_HEADER_BYTES:
+            raise ApiError(422, "invalid_multipart", "Multipart part header is too long")
+        return current + more
+
     def on_header_field(data: bytes, start: int, end: int) -> None:
-        state["field"] += data[start:end]
+        state["field"] = bounded(state["field"], data[start:end])
 
     def on_header_value(data: bytes, start: int, end: int) -> None:
-        state["value"] += data[start:end]
+        state["value"] = bounded(state["value"], data[start:end])
 
     def on_header_end() -> None:
+        if len(state["headers"]) >= MAX_PART_HEADERS:
+            raise ApiError(422, "invalid_multipart", "Multipart part has too many headers")
         state["headers"][state["field"].lower()] = state["value"]
         state["field"] = state["value"] = b""
 
@@ -87,14 +105,21 @@ async def _multipart_file_chunks(request: Request, boundary: bytes) -> AsyncIter
             "on_part_end": on_part_end,
         },
     )
+    body = request.stream()
+    received = 0
     try:
-        async for chunk in request.stream():
+        async for chunk in body:
+            received += len(chunk)
+            if received > max_bytes + MAX_MULTIPART_OVERHEAD_BYTES:
+                raise _too_large(max_bytes)
             parser.write(chunk)
             if pending:
                 yield b"".join(pending)
                 pending.clear()
         parser.finalize()
     except ApiError:
+        # Read (a bounded amount of) the rest, so the client reliably gets the error response.
+        await _drain(body, MAX_DRAIN_BYTES)
         raise
     except Exception as exc:  # malformed multipart
         if exc.__class__.__name__ == "ClientDisconnect":
@@ -112,7 +137,7 @@ async def receive_csv_upload(request: Request, storage: Storage, max_bytes: int)
         boundary = opts.get(b"boundary")
         if not boundary:
             raise ApiError(422, "invalid_multipart", "Multipart body has no boundary")
-        chunks = _multipart_file_chunks(request, boundary)
+        chunks = _multipart_file_chunks(request, boundary, max_bytes)
     elif content_type in (b"text/csv", b"application/csv", b"application/octet-stream"):
         chunks = request.stream()
     else:
@@ -121,7 +146,7 @@ async def receive_csv_upload(request: Request, storage: Storage, max_bytes: int)
         )
 
     declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > max_bytes + MAX_HEADER_BYTES:
+    if declared and declared.isdigit() and int(declared) > max_bytes + MAX_MULTIPART_OVERHEAD_BYTES:
         await _drain(request.stream(), max_bytes + MAX_DRAIN_BYTES)
         raise _too_large(max_bytes)
 

@@ -24,7 +24,7 @@ All endpoints are under `/api/v1`, except `/health`. Interactive docs are at `/d
 | `POST` | `/api/v1/exports` | Start a gzipped CSV export, or reuse a finished or in-progress export of the current data. Needs `X-API-Key`. | `202` new / `200` reused, + job |
 | `GET` | `/api/v1/exports/{job_id}/file` | Download a finished export (`application/gzip`). | `200` / `409` not ready / `410` replaced |
 | `GET` | `/api/v1/jobs/{job_id}` | Get a snapshot of a job's status. | `200` / `404` |
-| `GET` | `/api/v1/jobs/{job_id}/events` | Stream live job progress over SSE. The stream closes when the job succeeds or fails. | `text/event-stream` |
+| `GET` | `/api/v1/jobs/{job_id}/events` | Stream live job progress over SSE. The stream closes when the job succeeds or fails. | `text/event-stream` / `503` too many streams |
 | `GET` | `/health` | Check that the service and database are up, and report the cache state. | `200` / `503` |
 
 **Search parameters** for `GET /api/v1/movies`:
@@ -58,7 +58,7 @@ Unknown genres and unknown query parameters return `422`.
 
 **Authentication:** the two write endpoints (`POST /imports` and `POST /exports`) need an `X-API-Key` header that matches the `API_KEY` setting. Read endpoints are open. See [API keys](#api-keys) for how keys are set up.
 
-**Status codes:** `401` for a missing or wrong API key, `404` for a missing resource, `409` for an export that isn't ready, `413` for an oversized upload, `422` for invalid input, and a generic `500` for unexpected errors. Error details go to the logs, never to the client.
+**Status codes:** `401` for a missing or wrong API key, `404` for a missing resource, `409` for an export that isn't ready, `413` for an oversized upload, `422` for invalid input, `503` (with `Retry-After`) when an API process already has `MAX_EVENT_STREAMS` progress streams open, and a generic `500` for unexpected errors. Error details go to the logs, never to the client.
 
 ## Tech stack
 
