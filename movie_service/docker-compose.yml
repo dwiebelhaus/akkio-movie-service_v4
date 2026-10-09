@@ -1,0 +1,47 @@
+# Host ports come from env vars so parallel worktrees / test runs don't collide (0 = random).
+# Set COMPOSE_PROJECT_NAME (or `-p`) per worktree.
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-movies}:${POSTGRES_PASSWORD:-movies}@postgres:5432/${POSTGRES_DB:-movies}
+  API_KEY: ${API_KEY:-dev-api-key}
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-67108864}
+  STATEMENT_TIMEOUT_MS: ${STATEMENT_TIMEOUT_MS:-5000}
+  DATA_DIR: /data
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-movies}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-movies}
+      POSTGRES_DB: ${POSTGRES_DB:-movies}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: .
+    environment: *app-env
+    volumes:
+      - data:/data
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
+  data:

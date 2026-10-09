@@ -22,10 +22,15 @@ FastAPI movie database service
 
 ## Layout
 
-- `app/main.py` — FastAPI app (entrypoint set in `pyproject.toml` `[tool.fastapi]`); includes routers.
-- `app/routers/movies.py` — API router for movie endpoints.
+- `app/main.py` — FastAPI app (entrypoint set in `pyproject.toml` `[tool.fastapi]`); lifespan opens the DB pool and runs migrations; includes routers (versioned under `/api/v1`, `/health` at the root).
+- `app/config.py` — settings from env vars (pydantic-settings).
+- `app/errors.py` — `ApiError` and handlers that give every error the `ErrorResponse` shape.
+- `app/db/` — connection pool, `migrate.py`, and plain-SQL migrations in `migrations/NNN_name.sql` (applied in order at startup; never edit an applied migration, add a new one).
+- `app/routers/` — one router per resource (`health.py`, `movies.py`, ...).
 - `app/domain/` — Domain classes (plain dataclasses, e.g. `Movie`), independent of the API layer.
 - `app/schemas/` — Pydantic models, one file per schema, re-exported from `app/schemas/__init__.py` (`MoviesQuery` is a starter example; update it, e.g. `genres: list[str]`, integer years).
+- `tests/unit/` — fast tests, no Docker. `tests/e2e/` — real HTTP requests with `httpx` against an isolated Docker Compose stack started by pytest-docker.
+- `run.py` — one-command runner (`up`, `test`, `down`, `logs`); `docker-compose.yml`, `Dockerfile`, `.env.example`.
 - `movies.csv` — sample data. Columns: `movie_name,year,genres,rating`. `genres` is a comma-separated quoted string; `rating` may be empty.
 
 ## Commands
@@ -34,7 +39,10 @@ Python is pinned to 3.13 via `.python-version` (`pydantic-core` has no 3.14 whee
 
 ```bash
 uv sync                          # install dependencies
-uv run fastapi dev                #  run dev server, docs at localhost:8000/docs
+uv run fastapi dev                # run dev server, docs at localhost:8000/docs (needs a reachable Postgres via DATABASE_URL)
+uv run python run.py up          # build and start the full stack in Docker
+uv run python run.py test        # run all tests (extra args go to pytest, e.g. `tests/unit -q`)
+uv run python run.py down        # stop the stack (`--volumes` wipes data)
 uv add <package>                 # add a dependency (never edit uv.lock by hand)
 ```
 
@@ -81,11 +89,11 @@ Use `git worktree list` to see active worktrees and `git worktree prune` to clea
 ## Conventions
 
 - Keep endpoints `async`; offload blocking/CPU work (CSV parsing, gzip) to a threadpool or stream it. Long running endpoints require real-time status updates.
-- Use Pydantic models for request/response validation; return proper HTTP errors (4xx for bad input, never an unhandled 500).
+- Use Pydantic models for request/response validation; expected failures (bad input, missing resources, conflicts) return a specific 4xx via `ApiError`.
 - Handle missing values in the data (empty ratings) and malformed rows without crashing.
 - Add dependencies only with `uv add`; commit `pyproject.toml` and `uv.lock` together.
-- Each requirement should have an end to end test built when reasonable
-- Unhandled exceptions should return 500 http status
+- Each requirement should have an end to end test built when reasonable: real HTTP calls with `httpx` against the Docker stack, not `TestClient` or mocks.
+- Truly unexpected exceptions are caught by the global handler and return a generic `500` `ErrorResponse`; details go to the logs, never to the client.
 - Follow REST best practices for api design
 - Data design should be well normalized
 
