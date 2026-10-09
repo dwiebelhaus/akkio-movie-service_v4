@@ -166,11 +166,12 @@ Versioned under `/api/v1` (except `GET /health`, which stays at the root for loa
 
 **Search parameters:** `year_from`, `year_to` (inclusive integers), `genre` (repeatable: `?genre=Action&genre=Drama`), `genre_match=any|all` (default `any`), `limit` (default 50, max 1000), `cursor`.
 
-- Pagination is keyset-based (an opaque cursor over `id`), so deep pages stay fast on large tables.
+- Pagination is keyset-based (an opaque cursor over `id`), so deep pages stay fast on large tables. Results are ordered by `id`, which follows first-import file order.
 - Movies with an unknown year are excluded when either year bound is set.
-- Unknown genre names return `422`.
+- Genre names are case-insensitive. Unknown genre names return `422` (`unknown_genre`), and so do unknown query parameters (a typo like `genres=` would otherwise silently return unfiltered results).
+- Query strategy: genre names are resolved to ids in the app (cached per dataset version), so the planner sees literal ids and their real selectivity. `any` is one semi-join on `movie_genres`; `all` is one semi-join per genre, which stays fast even for common genres (a `GROUP BY … HAVING count(*) = n` took up to 260 ms on the sample). Every filter shape measured under 4 ms on the 242k-movie sample.
 
-**Schemas** (one per file in `app/schemas/`): `MovieRead`, `MovieFilter`, `Page[T]`, `JobRead`, `ErrorResponse`.
+**Schemas** (one per file in `app/schemas/`): `MovieRead`, `MovieFilter`, `Page[T]` (`{"items": [...], "next_cursor": "..." | null}`), `JobRead`, `ErrorResponse`, `Health`.
 
 ```json
 // MovieRead
@@ -271,12 +272,13 @@ Everything keys on the **dataset version** (`dataset_state.version`). An import 
 **HTTP (all clients, CDNs, proxies):**
 - `GET /movies` and `GET /movies/{id}` return `ETag: "v{version}-{hash of normalized query}"` and `Cache-Control: public, max-age=3600` (`CACHE_MAX_AGE_SECONDS`).
 - A request with a matching `If-None-Match` gets `304 Not Modified` without touching Postgres or Redis.
+- Responses carry `X-Cache: HIT|MISS` to show whether the shared cache served them.
 - Trade-off: with a one-hour `max-age`, clients and CDNs may serve results up to an hour old after an import without asking. Revalidation after that is cheap (`304`). Lower `CACHE_MAX_AGE_SECONDS` if fresher results matter more.
 
 **Redis (shared across API replicas):**
 - Search pages and single movies are cached as serialized JSON under `movies:v{version}:{query hash}` with a TTL (`CACHE_TTL_SECONDS`, default 1 hour).
 - A version bump makes old keys unreachable, so there is no explicit invalidation; the TTL reclaims memory.
-- Fail-open: Redis errors and timeouts (short socket timeout) are logged and the request is served from Postgres. Redis is never required for correctness. Configured with `maxmemory` and `allkeys-lru`.
+- Fail-open: Redis errors and timeouts (250 ms socket timeout) are logged and the request is served from Postgres; Redis is then skipped for `CACHE_RETRY_SECONDS` so an outage costs requests nothing. Redis is never required for correctness, and `GET /health` reports it (`cache: ok|unavailable|disabled`) without failing. Configured with `maxmemory`, `allkeys-lru` and no persistence.
 
 **Exports:**
 - Each export records the dataset version it was built from. `POST /exports` returns the existing job (`200`, not `202`) if a succeeded export for the current version still has its file, or an in-progress export for the current version is running; otherwise it queues a new one (`202`).

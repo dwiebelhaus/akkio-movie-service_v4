@@ -6,6 +6,7 @@ when the session ends.
 """
 
 import os
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -28,6 +29,8 @@ os.environ.update(
     JOB_HEARTBEAT_SECONDS="1",
     JOB_STALE_SECONDS="4",
     JOB_SWEEP_INTERVAL_SECONDS="1",
+    # Retry Redis quickly after an outage so the fail-open test can watch it recover.
+    CACHE_RETRY_SECONDS="1",
 )
 
 
@@ -83,3 +86,17 @@ def db_url(docker_ip: str, docker_services, api_url: str) -> str:
 def db(db_url: str):
     with psycopg.connect(db_url, autocommit=True) as conn:
         yield conn
+
+
+@pytest.fixture(scope="session")
+def compose(docker_compose_file: str, docker_compose_project_name: str):
+    """Run a `docker compose` subcommand against the test stack, e.g. `compose("stop", "redis")`."""
+
+    def run(*args: str) -> None:
+        subprocess.run(
+            ["docker", "compose", "-p", docker_compose_project_name, "-f", docker_compose_file, *args],
+            check=True,
+            capture_output=True,
+        )
+
+    return run

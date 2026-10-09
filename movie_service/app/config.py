@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     job_stale_seconds: float = Field(default=60, gt=0)
     job_sweep_interval_seconds: float = Field(default=15, gt=0)
 
+    # Caching (DESIGN.md §13). An empty REDIS_URL disables the shared cache.
+    redis_url: str = ""
+    cache_ttl_seconds: int = Field(default=3600, gt=0)
+    cache_max_age_seconds: int = Field(default=3600, ge=0)
+    # After a Redis error, skip Redis for this long before trying again (fail-open).
+    cache_retry_seconds: float = Field(default=10, gt=0)
+
     log_level: str = "INFO"
 
 
