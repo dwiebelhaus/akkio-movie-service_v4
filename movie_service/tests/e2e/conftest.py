@@ -15,7 +15,7 @@ import psycopg
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-API_KEY = "test-api-key"
+API_KEY = "test-api-key-0123456789"
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # fits the 16.6 MB sample; small enough for quick 413 tests
 
@@ -103,11 +103,13 @@ def db(db_url: str):
 def compose(docker_compose_file: str, docker_compose_project_name: str):
     """Run a `docker compose` subcommand against the test stack, e.g. `compose("stop", "redis")`."""
 
-    def run(*args: str) -> None:
-        subprocess.run(
+    def run(*args: str, check: bool = True, timeout: float | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
             ["docker", "compose", "-p", docker_compose_project_name, "-f", docker_compose_file, *args],
-            check=True,
+            check=check,
             capture_output=True,
+            text=True,
+            timeout=timeout,
         )
 
     return run

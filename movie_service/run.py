@@ -12,6 +12,7 @@
 import argparse
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 COMPOSE = ["docker", "compose", "--project-directory", str(ROOT)]
 PREFERRED_API_PORT = 8000
+MIN_API_KEY_LENGTH = 16  # app.config.MIN_API_KEY_LENGTH; run.py doesn't import the app
 
 
 def compose(
@@ -80,6 +82,21 @@ def env_value(name: str, default: str) -> str:
     return default
 
 
+def ensure_api_key() -> None:
+    """The services require API_KEY; if none is configured, generate one into `.env`."""
+    if configured := env_value("API_KEY", ""):
+        if len(configured) < MIN_API_KEY_LENGTH:
+            raise SystemExit(f"API_KEY must be at least {MIN_API_KEY_LENGTH} characters; fix it in .env.")
+        return
+    key = secrets.token_urlsafe(32)
+    env_file = ROOT / ".env"
+    lines = env_file.read_text().splitlines() if env_file.exists() else []
+    # Replace an empty `API_KEY=` line (as in .env.example) rather than adding a second one.
+    lines = [line for line in lines if line.partition("=")[0].strip() != "API_KEY"]
+    env_file.write_text("\n".join([*lines, f"API_KEY={key}"]) + "\n")
+    print(f"Generated an API key in {env_file.name} (API_KEY); send it as the X-API-Key header for writes.")
+
+
 def follow_job(client, job_id: int) -> tuple[str | None, dict]:
     """Print a job's SSE progress until it finishes; returns the final (event, job)."""
     event, job = None, {}
@@ -103,7 +120,7 @@ def _client(url: str):
 
 def seed(url: str, csv_path: Path) -> int:
     """Upload a CSV through the API and follow the job's SSE progress stream."""
-    headers = {"X-API-Key": env_value("API_KEY", "dev-api-key")}
+    headers = {"X-API-Key": env_value("API_KEY", "")}
     print(f"Importing {csv_path.name} ({csv_path.stat().st_size / 1e6:.1f} MB)...")
     with _client(url) as client:
         with csv_path.open("rb") as f:
@@ -122,7 +139,7 @@ def seed(url: str, csv_path: Path) -> int:
 
 def cmd_export(args: argparse.Namespace) -> int:
     """Request an export (or reuse a current one), follow progress, and download it."""
-    headers = {"X-API-Key": env_value("API_KEY", "dev-api-key")}
+    headers = {"X-API-Key": env_value("API_KEY", "")}
     with _client(api_url()) as client:
         resp = client.post("/api/v1/exports", headers=headers)
         if resp.status_code not in (200, 202):
@@ -144,6 +161,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
+    ensure_api_key()
     compose("up", "-d", "--build", "--wait", env={**os.environ, "API_PORT": choose_api_port()})
     url = api_url()
     print(f"\nMovie API is up: {url}  (docs: {url}/docs)")

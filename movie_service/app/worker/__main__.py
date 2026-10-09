@@ -26,6 +26,8 @@ from app.services.storage import LocalStorage, Storage
 logger = logging.getLogger("app.worker")
 
 _IDLE_POLL_SECONDS = 5
+_MIN_BACKOFF_SECONDS = 0.5
+_MAX_BACKOFF_SECONDS = 10
 
 
 class Worker:
@@ -41,13 +43,23 @@ class Worker:
             asyncio.create_task(self._listen_for_jobs(), name="listen"),
             asyncio.create_task(self._sweep_stale_jobs(), name="sweep"),
         ]
+        backoff = _MIN_BACKOFF_SECONDS
         try:
             while not self.stopping.is_set():
-                job = await jobs.claim_next_job(self.pool)
-                if job is None:
-                    await self._wait_for_work()
-                    continue
-                await self._run_job(job)
+                try:
+                    job = await jobs.claim_next_job(self.pool)
+                    if job is None:
+                        await self._wait_for_work()
+                        continue
+                    await self._run_job(job)
+                except Exception as exc:
+                    # Usually the database is briefly unreachable. Keep the worker alive: a job
+                    # left `running` is failed by the stale-job sweep once heartbeats stop.
+                    logger.warning("worker loop error (%s); retrying in %.1fs", exc, backoff)
+                    await self._sleep_unless_stopping(backoff)
+                    backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
+                else:
+                    backoff = _MIN_BACKOFF_SECONDS
         finally:
             for task in background:
                 task.cancel()
@@ -59,6 +71,10 @@ class Worker:
         await asyncio.wait(waiters, timeout=_IDLE_POLL_SECONDS, return_when=asyncio.FIRST_COMPLETED)
         for w in waiters:
             w.cancel()
+
+    async def _sleep_unless_stopping(self, seconds: float) -> None:
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self.stopping.wait(), seconds)
 
     async def _run_job(self, job: dict) -> None:
         job_id = job["id"]
@@ -91,6 +107,10 @@ class Worker:
                 raise ValueError(f"unsupported job type {job['type']!r}")
         except asyncio.CancelledError:
             raise
+        except jobs.JobNotRunningError:
+            # The stale-job sweep failed it (e.g. heartbeats were delayed); clients were told it
+            # failed, so its work was rolled back rather than committed.
+            logger.warning("job %s was no longer running when it finished; result discarded", job_id)
         except CsvFileError as exc:
             logger.info("job %s failed: %s", job_id, exc)
             await jobs.mark_failed(self.pool, job_id, str(exc))

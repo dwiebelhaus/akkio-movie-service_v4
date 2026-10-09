@@ -5,7 +5,8 @@
 
 x-app-env: &app-env
   DATABASE_URL: postgresql://${POSTGRES_USER:-movies}:${POSTGRES_PASSWORD:-movies}@postgres:5432/${POSTGRES_DB:-movies}
-  API_KEY: ${API_KEY:-dev-api-key}
+  # Required (16+ characters); the services refuse to start without it. `run.py up` generates one.
+  API_KEY: ${API_KEY:-}
   MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-67108864}
   STATEMENT_TIMEOUT_MS: ${STATEMENT_TIMEOUT_MS:-5000}
   DATA_DIR: /data
@@ -23,6 +24,7 @@ x-app-env: &app-env
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-movies}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-movies}
@@ -40,6 +42,7 @@ services:
   # Cache only (DESIGN.md §13): no persistence, bounded memory, LRU eviction.
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: ["redis-server", "--save", "", "--appendonly", "no",
               "--maxmemory", "${REDIS_MAXMEMORY:-256mb}", "--maxmemory-policy", "allkeys-lru"]
     healthcheck:
@@ -50,6 +53,7 @@ services:
 
   api:
     build: .
+    restart: unless-stopped
     environment: *app-env
     volumes:
       - data:/data
@@ -69,6 +73,7 @@ services:
 
   worker:
     build: .
+    restart: unless-stopped
     command: ["python", "-m", "app.worker"]
     environment: *app-env
     volumes:

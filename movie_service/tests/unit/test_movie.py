@@ -100,3 +100,16 @@ def test_every_sample_row_parses():
     with (Path(__file__).resolve().parents[2] / "movies.csv").open(newline="") as f:
         for r in csv.DictReader(f):
             Movie.from_csv_row(r)
+
+
+def test_nul_bytes_are_removed_from_names():
+    # Postgres text can't hold NUL; one left in would fail the whole import.
+    movie = Movie.from_csv_row(row(movie_name="Glass\x00 Onion", genres="Com\x00edy"))
+    assert movie.movie_name == "Glass Onion"
+    assert movie.genres == ("Comedy",)
+
+
+@pytest.mark.parametrize("field", ["year", "rating"])
+def test_nul_byte_in_a_number_is_rejected(field):
+    with pytest.raises(ValueError, match=f"invalid {field}"):
+        Movie.from_csv_row(row(**{field: "5\x00"}))
