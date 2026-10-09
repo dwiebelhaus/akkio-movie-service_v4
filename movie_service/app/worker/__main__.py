@@ -19,6 +19,7 @@ from app.db.pool import create_pool
 from app.domain import JobType
 from app.services import jobs
 from app.services.csv_import import CsvFileError
+from app.services.exporter import run_export
 from app.services.importer import run_import
 from app.services.storage import LocalStorage, Storage
 
@@ -84,6 +85,8 @@ class Worker:
         try:
             if job["type"] == JobType.IMPORT:
                 await run_import(self.pool, self.storage, self.settings, job)
+            elif job["type"] == JobType.EXPORT:
+                await run_export(self.pool, self.storage, self.settings, job)
             else:
                 raise ValueError(f"unsupported job type {job['type']!r}")
         except asyncio.CancelledError:

@@ -3,6 +3,7 @@
     uv run python run.py up [--seed] [--test]
                                            build and start the stack, wait until healthy;
                                            --seed imports movies.csv and shows progress
+    uv run python run.py export [-o FILE]  download the whole database as a gzipped CSV
     uv run python run.py test [pytest args] run the test suite (e2e tests start their own isolated stack)
     uv run python run.py down [--volumes]   stop the stack; --volumes also wipes the data
     uv run python run.py logs               follow the service logs
@@ -44,34 +45,66 @@ def env_value(name: str, default: str) -> str:
     return default
 
 
-def seed(url: str, csv_path: Path) -> int:
-    """Upload a CSV through the API and follow the job's SSE progress stream."""
+def follow_job(client, job_id: int) -> tuple[str | None, dict]:
+    """Print a job's SSE progress until it finishes; returns the final (event, job)."""
+    event, job = None, {}
+    with client.stream("GET", f"/api/v1/jobs/{job_id}/events") as stream:
+        for line in stream.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                job = json.loads(line.split(":", 1)[1])
+                rows = job.get("processed_rows") or 0
+                print(f"\r  job {job_id}: {job['status']:<9} {job['progress']:6.1%}  {rows:>9,} rows", end="", flush=True)
+    print()
+    return event, job
+
+
+def _client(url: str):
     import httpx
 
+    return httpx.Client(base_url=url, timeout=httpx.Timeout(30, read=None))
+
+
+def seed(url: str, csv_path: Path) -> int:
+    """Upload a CSV through the API and follow the job's SSE progress stream."""
     headers = {"X-API-Key": env_value("API_KEY", "dev-api-key")}
     print(f"Importing {csv_path.name} ({csv_path.stat().st_size / 1e6:.1f} MB)...")
-    with httpx.Client(base_url=url, timeout=httpx.Timeout(30, read=None)) as client:
+    with _client(url) as client:
         with csv_path.open("rb") as f:
             resp = client.post("/api/v1/imports", headers=headers, files={"file": (csv_path.name, f, "text/csv")})
         if resp.status_code != 202:
             print(f"import rejected ({resp.status_code}): {resp.text}", file=sys.stderr)
             return 1
-        job_id = resp.json()["id"]
-        event, job = None, {}
-        with client.stream("GET", f"/api/v1/jobs/{job_id}/events") as stream:
-            for line in stream.iter_lines():
-                if line.startswith("event:"):
-                    event = line.split(":", 1)[1].strip()
-                elif line.startswith("data:"):
-                    job = json.loads(line.split(":", 1)[1])
-                    rows = job.get("processed_rows") or 0
-                    print(f"\r  job {job_id}: {job['status']:<9} {job['progress']:6.1%}  {rows:>9,} rows", end="", flush=True)
-    print()
+        event, job = follow_job(client, resp.json()["id"])
     if event != "succeeded":
         print(f"import failed: {job.get('error')}", file=sys.stderr)
         return 1
     result = {k: v for k, v in job["result"].items() if k != "rejected_samples"}
     print("  " + ", ".join(f"{k}={v}" for k, v in result.items()))
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Request an export (or reuse a current one), follow progress, and download it."""
+    headers = {"X-API-Key": env_value("API_KEY", "dev-api-key")}
+    with _client(api_url()) as client:
+        resp = client.post("/api/v1/exports", headers=headers)
+        if resp.status_code not in (200, 202):
+            print(f"export rejected ({resp.status_code}): {resp.text}", file=sys.stderr)
+            return 1
+        job_id = resp.json()["id"]
+        print("Reusing current export" if resp.status_code == 200 else "Exporting...")
+        event, job = follow_job(client, job_id)
+        if event != "succeeded":
+            print(f"export failed: {job.get('error')}", file=sys.stderr)
+            return 1
+        out = Path(args.output)
+        with client.stream("GET", f"/api/v1/exports/{job_id}/file") as stream, out.open("wb") as f:
+            stream.raise_for_status()
+            for chunk in stream.iter_bytes():
+                f.write(chunk)
+    print(f"  saved {job['result']['rows']:,} movies to {out} ({out.stat().st_size / 1e6:.1f} MB)")
     return 0
 
 
@@ -111,6 +144,10 @@ def main() -> int:
     up.add_argument("--seed", action="store_true", help="import the sample movies.csv after startup")
     up.add_argument("--test", action="store_true", help="run the test suite after startup")
     up.set_defaults(func=cmd_up)
+
+    export = sub.add_parser("export", help="download the database as a gzipped CSV")
+    export.add_argument("-o", "--output", default="movies-export.csv.gz", help="output file")
+    export.set_defaults(func=cmd_export)
 
     test = sub.add_parser("test", help="run the test suite; extra arguments go to pytest")
     test.set_defaults(func=cmd_test)

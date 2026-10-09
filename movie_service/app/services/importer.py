@@ -131,31 +131,13 @@ def _read_encoded(reader: CsvBatchReader) -> tuple[Batch, bytes] | None:
     return None if batch is None else (batch, encode_copy_rows(batch))
 
 
-class ProgressReporter:
-    """Throttled progress writes (at most one per interval) on their own connection,
-    so they are visible while the import transaction is still open."""
-
-    def __init__(self, pool: AsyncConnectionPool, job_id: int, interval: float):
-        self._pool = pool
-        self._job_id = job_id
-        self._interval = interval
-        self._last = 0.0
-
-    async def update(self, progress: float, processed_rows: int, *, force: bool = False) -> None:
-        now = time.monotonic()
-        if not force and now - self._last < self._interval:
-            return
-        self._last = now
-        await jobs.report_progress(self._pool, self._job_id, progress, processed_rows)
-
-
 async def run_import(pool: AsyncConnectionPool, storage: Storage, settings: Settings, job: dict) -> dict:
     """Run one import job to completion and mark it succeeded. Raises on failure."""
     job_id = job["id"]
     params = job["params"]
     upload_key = params["upload_key"]
     file_size = max(await asyncio.to_thread(storage.size, upload_key), 1)
-    progress = ProgressReporter(pool, job_id, settings.progress_interval_seconds)
+    progress = jobs.ProgressReporter(pool, job_id, settings.progress_interval_seconds)
 
     file = await asyncio.to_thread(storage.open_read, upload_key)
     try:

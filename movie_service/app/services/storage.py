@@ -18,6 +18,7 @@ class Storage(Protocol):
     def size(self, key: str) -> int: ...
     def exists(self, key: str) -> bool: ...
     def delete(self, key: str) -> None: ...
+    def move(self, src: str, dst: str) -> None: ...
 
 
 class LocalStorage:
@@ -52,3 +53,7 @@ class LocalStorage:
             os.remove(self._path(key))
         except FileNotFoundError:
             pass
+
+    def move(self, src: str, dst: str) -> None:
+        """Atomically replace `dst` with `src` (used to publish finished files)."""
+        os.replace(self._path(src), self._path(dst))
