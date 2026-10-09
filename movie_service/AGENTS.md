@@ -45,11 +45,12 @@ uv run fastapi dev                # run dev server, docs at localhost:8000/docs 
 uv run python run.py up          # build and start the full stack in Docker
 uv run python run.py export      # download the database as movies-export.csv.gz
 uv run python run.py test        # run all tests (extra args go to pytest, e.g. `tests/unit -q`)
+E2E_KEEP_STACK=1 uv run python run.py test tests/e2e   # keep the e2e stack running afterwards for debugging
 uv run python run.py down        # stop the stack (`--volumes` wipes data)
 uv add <package>                 # add a dependency (never edit uv.lock by hand)
 ```
 
-Run commands from this directory (`movie_service/`).
+Run commands from this directory (`movie_service/`). CI (`.github/workflows/ci.yml`) runs the unit and e2e suites on every PR and push to `main`.
 
 ## Parallel work with git worktrees
 

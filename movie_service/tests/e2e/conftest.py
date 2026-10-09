@@ -50,6 +50,13 @@ def docker_setup() -> list[str]:
 
 
 @pytest.fixture(scope="session")
+def docker_cleanup() -> list[str]:
+    # E2E_KEEP_STACK=1 leaves the stack running for debugging (CI sets it to collect logs on
+    # failure; its runners are discarded anyway).
+    return [] if os.environ.get("E2E_KEEP_STACK") == "1" else ["down -v"]
+
+
+@pytest.fixture(scope="session")
 def api_url(docker_ip: str, docker_services) -> str:
     url = f"http://{docker_ip}:{docker_services.port_for('api', 8000)}"
 
