@@ -63,7 +63,7 @@ Four containers, run with Docker Compose:
 
 **File storage:** uploads and exports live on a shared volume behind a small `Storage` interface (`LocalStorage` now, with S3/GCS possible later), so the design stays cloud-agnostic.
 
-Code layout, extending the current skeleton:
+Code layout:
 
 ```
 app/
@@ -89,12 +89,12 @@ Normalized (3NF), snake_case, plural table names.
 movies (
   id            bigint generated always as identity primary key,
   title         text        not null,
-  title_key     text        not null,   -- normalized title: lowercased, whitespace collapsed
+  title_key     text collate "C" not null,  -- normalized title: case-folded, whitespace collapsed
   year          smallint,               -- null = unknown
-  genre_key     text        not null,   -- sorted genre names joined with '|' (dedup only)
+  genre_key     text collate "C" not null,  -- sorted genre names joined with '|' (dedup only)
   rating        numeric(3,1),           -- null = unrated
-  first_import_id bigint references jobs(id),
-  last_import_id  bigint references jobs(id),
+  first_import_id bigint,               -- audit: import that created the row (no FK, D14)
+  last_import_id  bigint,               -- audit: last import that changed the rating
   updated_at    timestamptz not null default now(),
   unique nulls not distinct (title_key, year, genre_key)
 )
@@ -129,7 +129,9 @@ dataset_state (            -- single row
 
 Indexes: `movies (year)`, `movie_genres (genre_id, movie_id)`, `jobs (status, created_at)`.
 
-`genre_key` is a derived column that exists only to back the uniqueness constraint. The source of truth for genres is `movie_genres`.
+`genre_key` is a derived column that exists only to back the uniqueness constraint. The source of truth for genres is `movie_genres`, whose foreign keys to `movies` and `genres` are enforced by Postgres.
+
+The identity keys use the `"C"` collation (byte-wise comparison): they are never used for display ordering, and it makes index maintenance and joins much faster than locale-aware collation.
 
 ## 5. Merge and deduplication (R2)
 
@@ -190,7 +192,9 @@ Imports and exports always run as jobs, because their duration grows with the da
 2. A worker claims the job and updates `progress` and `processed_rows` at most every ~250 ms or every N rows, issuing `NOTIFY job_progress, '<id>'` with each update.
 3. `GET /jobs/{id}/events` sends the current state immediately, then pushes an event on each notification, and closes after a final `succeeded` or `failed` event. Clients that can't use SSE poll `GET /jobs/{id}`.
 
-Import progress is measured by bytes read divided by file size, which works without counting rows first. Export progress is rows written divided by the movie count.
+Import progress is measured by bytes read divided by file size during staging, which works without counting rows first, then by chunks of genre links during the merge. The shares (25% staging, 10% movie insert, 65% links) roughly match measured time on a fresh database, so the bar moves steadily. Export progress is rows written divided by the movie count.
+
+Measured on the 367k-row sample (242k movies, 480k links): a first import takes about 37s, of which about 23s is per-row foreign-key checks on `movie_genres` (kept by choice, D14). Re-importing the same file takes about 10s and writes nothing.
 
 Search is synchronous. It is kept under 2 seconds with indexes, keyset pagination and the `limit` cap, and a database statement timeout returns a clean error instead of hanging.
 
@@ -201,8 +205,13 @@ Search is synchronous. It is kept under 2 seconds with indexes, keyset paginatio
    - **Header:** the required columns (`movie_name`, `year`, `genres`, `rating`) must be present, in any order; otherwise `422`. Extra columns are ignored and listed in `result.warnings`.
    - Then it creates a job and returns `202`.
 2. **Parse:** the worker reads the file with `csv.reader` in batches of about 10k rows and normalizes each row (`Movie.from_csv_row`). Bad rows (unparseable year or rating, missing title, wrong field count) are skipped: they are counted in `result.rejected`, and the first 100 are recorded with line numbers and reasons in `result.rejected_samples`. Bad rows never fail the job. Only file-level problems do (not a CSV, unreadable encoding, missing required columns).
-3. **Stage:** `COPY` each batch into an unlogged `import_staging` table, tagged with the job ID.
-4. **Merge:** set-based SQL in one transaction: upsert genres, collapse duplicates within the file, `INSERT … ON CONFLICT (title_key, year, genre_key) DO UPDATE`, insert `movie_genres`, then clear the staging rows.
+3. **Stage:** each batch is encoded to `COPY` text format in a thread (one batch ahead, so parsing overlaps the database write) and streamed into a per-import temp table (`ON COMMIT DROP`: not WAL-logged, no cleanup, nothing left behind by a crash).
+4. **Merge:** set-based SQL in the same transaction, under the import advisory lock:
+   - collapse duplicates within the file into a second temp table and `ANALYZE` it
+   - insert genres that don't exist yet (resolved once per distinct `genre_key`, so identity values aren't burned)
+   - `UPDATE` matched movies whose rating changed, then `INSERT … WHERE NOT EXISTS` new movies in file order. Under the lock this is safe and about 3× cheaper than `INSERT … ON CONFLICT`; the unique constraint stays as a backstop.
+   - insert `movie_genres` for the new movies in chunks of 20k movie ids, reporting progress after each chunk
+   - bump the dataset version if anything changed (§13)
 5. **Finish:** write the counts to `result` and mark the job `succeeded`. If any step fails, the transaction rolls back and the job is marked `failed` with an error.
 
 Concurrent imports are serialized with a Postgres advisory lock, so merges never race.
@@ -291,6 +300,7 @@ Everything keys on the **dataset version** (`dataset_state.version`). An import 
 | D11 | Shared cache | Redis caches search results and single movies across replicas, versioned keys plus TTL, fail-open. Used only as a cache (jobs stay in Postgres, D4). |
 | D12 | Export reuse | `POST /exports` reuses a finished or in-progress export for the current dataset version. |
 | D13 | Crashed workers | Heartbeat plus sweep marks stale `running` jobs `failed`; graceful shutdown re-queues. |
+| D14 | Foreign keys | `movie_genres` keeps both FKs (integrity over ~23s of per-row checks on a first bulk import). `movies.first/last_import_id` are plain audit columns without FKs, which also lets old jobs be pruned. |
 
 ## Open questions
 
