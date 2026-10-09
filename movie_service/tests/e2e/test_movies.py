@@ -235,3 +235,14 @@ def test_openapi_enumerates_genres(client, catalog):
     (genre,) = [p for p in params if p["name"] == "genre"]
     assert set(catalog) <= set(genre["schema"]["items"]["enum"])
     assert client.get("/docs").status_code == 200
+
+
+def test_lost_dataset_notification_is_caught_by_periodic_refresh(client, db):
+    """If a dataset-change notification is lost, the API notices the new version anyway
+    (DATASET_VERSION_REFRESH_SECONDS), so caches don't stay stale."""
+    client.get("/api/v1/genres")
+    new = db.execute("update dataset_state set version = version + 1 returning version").fetchone()[0]
+    deadline = time.monotonic() + 10
+    while not client.get("/api/v1/genres").headers["etag"].startswith(f'"v{new}-'):
+        assert time.monotonic() < deadline, "API never noticed the new dataset version"
+        time.sleep(0.2)

@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
     await pool.open(wait=True, timeout=30)
     async with pool.connection() as conn:
         await migrate(conn)
-    hub = JobEventHub(settings.database_url)
+    hub = JobEventHub(settings.database_url, pool, settings.dataset_version_refresh_seconds)
     await hub.start()
     app.state.pool = pool
     app.state.hub = hub

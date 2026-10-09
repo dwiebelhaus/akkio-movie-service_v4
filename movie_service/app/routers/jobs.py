@@ -1,10 +1,9 @@
 import asyncio
-import contextlib
 
 from fastapi import APIRouter
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
-from app.dependencies import Hub, Pool
+from app.dependencies import Hub, Pool, SettingsDep
 from app.errors import ApiError
 from app.schemas import ErrorResponse, JobRead
 from app.services import jobs
@@ -14,6 +13,7 @@ router = APIRouter(tags=["jobs"])
 # Re-read the job at least this often even without a notification (belt and braces).
 _FALLBACK_POLL_SECONDS = 5
 _KEEPALIVE_SECONDS = 15
+_RETRY_AFTER_SECONDS = 5
 
 
 async def _load(pool, job_id: int) -> JobRead:
@@ -35,23 +35,34 @@ async def get_job(job_id: int, pool: Pool) -> JobRead:
     responses={
         200: {"content": {"text/event-stream": {}}, "description": "Server-sent JobRead events"},
         404: {"model": ErrorResponse},
+        503: {"model": ErrorResponse, "description": "Too many open event streams; retry later"},
     },
 )
-async def job_events(job_id: int, pool: Pool, hub: Hub) -> EventSourceResponse:
+async def job_events(job_id: int, pool: Pool, hub: Hub, settings: SettingsDep) -> EventSourceResponse:
     """Live progress as server-sent events.
 
     Sends the current state immediately, then an event on every change: `progress` while
     queued or running, then a final `succeeded` or `failed` event, after which the stream closes.
-    Each event's data is a `JobRead` JSON object.
+    Each event's data is a `JobRead` JSON object. Every stream of a job shares one database
+    read per change, however many clients are watching.
     """
-    await _load(pool, job_id)  # 404 before the stream starts
+    if hub.subscriber_count >= settings.max_event_streams:
+        raise ApiError(
+            503,
+            "too_many_streams",
+            "Too many open event streams; retry later or poll GET /jobs/{id}",
+            headers={"Retry-After": str(_RETRY_AFTER_SECONDS)},
+        )
+    initial = await jobs.get_job(pool, job_id)
+    if initial is None:  # 404 before the stream starts
+        raise ApiError(404, "job_not_found", f"Job {job_id} not found")
 
     async def stream():
-        with hub.subscribe(job_id) as changed:
+        with hub.subscribe(job_id, initial) as changed:
             last: JobRead | None = None
             while True:
                 changed.clear()
-                job = await _load(pool, job_id)
+                job = JobRead.model_validate(hub.snapshot(job_id))
                 if job != last:
                     terminal = job.status.is_terminal
                     yield ServerSentEvent(
@@ -61,7 +72,10 @@ async def job_events(job_id: int, pool: Pool, hub: Hub) -> EventSourceResponse:
                     if terminal:
                         return
                     last = job
-                with contextlib.suppress(TimeoutError):
+                try:
                     await asyncio.wait_for(changed.wait(), _FALLBACK_POLL_SECONDS)
+                except TimeoutError:
+                    # Shared across this job's streams: at most one read per poll interval.
+                    hub.refresh(job_id, min_age=_FALLBACK_POLL_SECONDS / 2)
 
     return EventSourceResponse(stream(), ping=_KEEPALIVE_SECONDS)

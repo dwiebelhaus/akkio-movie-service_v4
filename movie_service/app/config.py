@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     job_heartbeat_seconds: float = Field(default=5, gt=0)
     job_stale_seconds: float = Field(default=60, gt=0)
     job_sweep_interval_seconds: float = Field(default=15, gt=0)
+    # Per API process. Each open progress stream holds an HTTP connection and a little memory.
+    max_event_streams: int = Field(default=1000, gt=0)
+    # How often the API re-reads the dataset version, in case a change notification is lost.
+    dataset_version_refresh_seconds: float = Field(default=5, gt=0)
 
     # Caching (DESIGN.md §13). An empty REDIS_URL disables the shared cache.
     redis_url: str = ""
