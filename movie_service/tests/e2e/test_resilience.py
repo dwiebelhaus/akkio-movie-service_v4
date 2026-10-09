@@ -52,3 +52,13 @@ def test_worker_and_api_survive_a_database_restart(client, auth_headers, compose
     for year in range(1990, 2005):  # distinct queries (no cache hits), more than the pool size
         assert client.get("/api/v1/movies", params={"limit": 1, "year_from": year}).status_code == 200
     assert {service: _restart_count(compose, service) for service in ("api", "worker")} == before
+
+
+def test_redis_requires_a_password(client, compose):
+    noauth = compose("exec", "-T", "redis", "redis-cli", "ping", check=False)
+    assert "NOAUTH" in noauth.stdout + noauth.stderr
+    assert client.get("/health").json()["cache"] == "ok"  # the API connects with the password
+
+    proc = compose("run", "--rm", "--no-deps", "-e", "REDIS_PASSWORD=", "redis", check=False, timeout=60)
+    assert proc.returncode != 0
+    assert "REDIS_PASSWORD is required" in proc.stdout + proc.stderr

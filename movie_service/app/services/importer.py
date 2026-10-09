@@ -9,7 +9,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from app.config import Settings
 from app.services import jobs
-from app.services.csv_import import Batch, CsvBatchReader
+from app.services.csv_import import Batch, CsvBatchReader, CsvFileError
 from app.services.storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,9 @@ DATASET_CHANNEL = "dataset_changed"
 STAGING_SHARE = 0.25
 MOVIES_SHARE = 0.10
 LINK_CHUNK_MOVIES = 20_000
+# genres.id is a smallint (32,767 ids, and rolled-back imports use some up). Real data has a
+# few dozen genres; an import adding more than this is refused rather than exhausting the ids.
+MAX_NEW_GENRES_PER_IMPORT = 1_000
 
 # Each import stages into its own temp table: not WAL-logged, dropped at commit, and a
 # crashed import leaves nothing behind.
@@ -52,14 +55,19 @@ select title_key, year, genre_key,
 """
 
 # Genres match by key (case-insensitive); a new genre takes its first spelling in the file.
-_INSERT_NEW_GENRES = """
-insert into genres (key, name)
+_NEW_GENRES = """
+create temp table import_new_genres on commit drop as
 select distinct on (gn.key) gn.key, gn.name
   from import_movies b
  cross join lateral unnest(string_to_array(b.genre_key, '|'),
                            string_to_array(b.genres, '|')) as gn(key, name)
  where not exists (select 1 from genres g where g.key = gn.key)
  order by gn.key, b.first_line
+"""
+
+_INSERT_NEW_GENRES = """
+insert into genres (key, name)
+select key, name from import_new_genres order by key
 on conflict (key) do nothing
 """
 
@@ -174,6 +182,11 @@ async def run_import(pool: AsyncConnectionPool, storage: Storage, settings: Sett
             distinct_movies = cur.rowcount
             await conn.execute("analyze import_movies")
             await conn.execute("select pg_advisory_xact_lock(%s)", (IMPORT_LOCK_ID,))
+            cur = await conn.execute(_NEW_GENRES)
+            if cur.rowcount > MAX_NEW_GENRES_PER_IMPORT:
+                raise CsvFileError(
+                    f"File adds {cur.rowcount} new genres; at most {MAX_NEW_GENRES_PER_IMPORT} per import"
+                )
             await conn.execute(_INSERT_NEW_GENRES)
             cur = await conn.execute(_UPDATE_EXISTING, {"job_id": job_id})
             updated = cur.rowcount

@@ -1,6 +1,7 @@
 """R1/R2: importing CSVs, deduplication and merging, error handling, all over real HTTP."""
 
 import concurrent.futures
+import secrets
 from pathlib import Path
 
 import pytest
@@ -134,6 +135,47 @@ def test_bad_rows_are_skipped_and_reported(client, auth_headers):
     assert reasons[7] == "expected 4 fields, got 5"
     assert reasons[9].startswith("invalid rating")
 
+
+
+def test_rows_too_large_to_index_are_rejected_not_fatal(client, auth_headers):
+    """A title past Postgres's btree entry limit used to fail the whole import."""
+    p = unique_prefix()
+    content = make_csv(
+        [
+            [f"{p}Good", "1999", "Drama", "8.0"],
+            [p + secrets.token_hex(1600), "1999", "Drama", ""],  # 3.2 KB title
+            # Within the character limits, but 4-byte characters push the keys past 2,000 bytes.
+            [p + "\U0001d538" * 480, "1999", ",".join(f"{i}" + "h" * 59 for i in range(5)), ""],
+            [f"{p}Many genres", "1999", ",".join(f"G{i}" for i in range(21)), ""],
+            [f"{p}Long genre", "1999", "g" * 65, ""],
+            [f"{p}Huge year", "9" * 50_000, "Drama", ""],
+        ]
+    )
+    result = import_and_wait(client, content, auth_headers)["result"]
+    assert result["inserted"] == 1
+    assert result["rejected"] == 5
+    reasons = {s["line"]: s["reason"] for s in result["rejected_samples"]}
+    assert reasons[3] == "movie_name longer than 500 characters"
+    assert reasons[4] == "movie_name and genres are too long together"
+    assert reasons[5] == "more than 20 genres"
+    assert reasons[6] == "genre name longer than 64 characters"
+    # Reasons quote a bounded part of the value, so job results stay small.
+    assert reasons[7].startswith("invalid year: '999")
+    assert reasons[7].endswith("...")
+    assert len(reasons[7]) < 130
+
+
+def test_import_adding_too_many_genres_fails_cleanly(client, auth_headers, db):
+    """genres.id is a smallint: one import may add at most 1,000 genres."""
+    p = unique_prefix().strip()
+    rows = [[f"{p} {i}", "2000", ",".join(f"{p}g{i * 20 + j}" for j in range(20)), ""] for i in range(51)]
+    resp = upload(client, make_csv(rows), auth_headers)
+    assert resp.status_code == 202
+    name, job = follow_events(client, resp.json()["id"])[-1]
+    assert name == "failed"
+    assert job["error"] == "File adds 1020 new genres; at most 1000 per import"
+    assert db.execute("select count(*) from genres where name like %s", (f"{p}%",)).fetchone()[0] == 0
+    assert db.execute("select count(*) from movies where title like %s", (f"{p}%",)).fetchone()[0] == 0
 
 def test_columns_in_any_order_and_extras_ignored(client, auth_headers):
     p = unique_prefix()

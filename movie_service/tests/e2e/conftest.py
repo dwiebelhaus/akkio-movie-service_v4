@@ -16,6 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 API_KEY = "test-api-key-0123456789"
+REDIS_PASSWORD = "test-redis-password"
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # fits the 16.6 MB sample; small enough for quick 413 tests
 
@@ -24,6 +25,7 @@ os.environ.update(
     API_PORT="0",
     POSTGRES_PORT="0",
     API_KEY=API_KEY,
+    REDIS_PASSWORD=REDIS_PASSWORD,
     MAX_UPLOAD_BYTES=str(MAX_UPLOAD_BYTES),
     # Fast crash detection so the stale-job sweep can be tested in seconds.
     JOB_HEARTBEAT_SECONDS="1",

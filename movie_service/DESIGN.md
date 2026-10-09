@@ -208,7 +208,7 @@ Search is synchronous. It is kept under 2 seconds with indexes, keyset paginatio
    - **Size limit:** `MAX_UPLOAD_BYTES`, default **64 MB**. This is sized for about 750,000 movies: the sample averages 45 bytes per row (about 34 MB for 750k rows) and a 99th-percentile row is 81 bytes (about 61 MB). The limit is enforced while streaming, so an oversized upload is cut off early with `413` and the partial file is deleted. For multipart uploads the cap covers the whole body (the file plus 64 KB of overhead), and part headers are capped too (8 KB each, 16 per part; `422` beyond that), so extra fields can't be used to stream unbounded data or grow memory.
    - **Header:** the required columns (`movie_name`, `year`, `genres`, `rating`) must be present, in any order; otherwise `422`. Extra columns are ignored and listed in `result.warnings`.
    - Then it creates a job and returns `202`.
-2. **Parse:** the worker reads the file with `csv.reader` in batches of about 10k rows and normalizes each row (`Movie.from_csv_row`). Bad rows (unparseable year or rating, missing title, wrong field count) are skipped: they are counted in `result.rejected`, and the first 100 are recorded with line numbers and reasons in `result.rejected_samples`. Bad rows never fail the job. Only file-level problems do (not a CSV, unreadable encoding, missing required columns).
+2. **Parse:** the worker reads the file with `csv.reader` in batches of about 10k rows and normalizes each row (`Movie.from_csv_row`). Bad rows (unparseable year or rating, missing title, wrong field count, or a title over 500 characters, a genre name over 64, more than 20 genres, or title and genres together over 2,000 bytes, which keeps the identity key under Postgres's btree entry limit) are skipped: they are counted in `result.rejected`, and the first 100 are recorded with line numbers and reasons in `result.rejected_samples`. Reasons quote at most 100 characters of the bad value. Bad rows never fail the job. Only file-level problems do (not a CSV, unreadable encoding, missing required columns, or more than 1,000 new genres in one import, which protects the `smallint` genre ids from being used up).
 3. **Stage:** each batch is encoded to `COPY` text format in a thread (one batch ahead, so parsing overlaps the database write) and streamed into a per-import temp table (`ON COMMIT DROP`: not WAL-logged, no cleanup, nothing left behind by a crash).
 4. **Merge:** set-based SQL in the same transaction, under the import advisory lock:
    - collapse duplicates within the file into a second temp table and `ANALYZE` it
@@ -227,13 +227,15 @@ Concurrent imports are serialized with a Postgres advisory lock, so merges never
 3. Rows are gzipped (level 6) in a thread in 1 MB chunks into `exports/{id}.csv.gz.part`, then moved into place atomically, so a crash never leaves a half-written file that looks finished. Progress is rows written over the snapshot's movie count.
 4. The result records `rows`, `bytes`, `dataset_version` and `download_url`. Only the newest export file is kept; older downloads return `410 Gone`.
 
-The CSV matches the input format (empty fields for missing year, genres or rating), so an export re-imports with zero changes. On the sample it takes about 1.4s and produces 3.3 MB.
+The CSV matches the input format (empty fields for missing year, genres or rating), so an export re-imports with zero changes. Against CSV injection, a title or genre name that starts with `=`, `+`, `-` or `@` (after any `'`s) is written with a leading `'`, so spreadsheets show it as text; the importer removes one such `'`, so the round trip stays exact. On the sample it takes about 1.4s and produces 3.3 MB.
 
 `GET /exports/{id}/file` streams the file (`application/gzip`, `Content-Disposition: attachment`, `Content-Length`). It returns `409` while the export is queued or running, or if it failed, and `410` once a newer export has replaced it.
 
 ## 10. Error handling
 
 - Validation errors return `422`. A missing or invalid API key returns `401`. Missing resources return `404`. A job that isn't finished yet returns `409`. Oversized uploads return `413`.
+- A query that exceeds `STATEMENT_TIMEOUT_MS` returns `503 query_timeout`, and no free pooled connection returns `503 database_busy`, both with `Retry-After`: the database is overloaded, the request isn't wrong.
+- Path ids and pagination cursors must fit a Postgres `bigint` (else `422`): a larger number would be compared as `numeric`, which can't use the primary key index.
 - Unhandled exceptions return `500` with a generic `ErrorResponse`. Details go to the logs, never to the client.
 - Every error uses the `ErrorResponse` shape.
 - Worker crashes leave a job in `running`. Workers refresh `heartbeat_at` while running; a periodic sweep (any worker) marks jobs whose heartbeat is older than `JOB_STALE_SECONDS` as `failed` and notifies listeners, so SSE clients never wait forever. Failing (not re-queuing) avoids crash loops; imports are transactional, so a failed import leaves no partial data. On graceful shutdown (SIGTERM) a worker re-queues its current job.
@@ -289,7 +291,7 @@ Everything keys on the **dataset version** (`dataset_state.version`). An import 
 **Redis (shared across API replicas):**
 - Search pages and single movies are cached as serialized JSON under `movies:v{version}:{query hash}` with a TTL (`CACHE_TTL_SECONDS`, default 1 hour).
 - A version bump makes old keys unreachable, so there is no explicit invalidation; the TTL reclaims memory.
-- Fail-open: Redis errors and timeouts (250 ms socket timeout) are logged and the request is served from Postgres; Redis is then skipped for `CACHE_RETRY_SECONDS` so an outage costs requests nothing. Redis is never required for correctness, and `GET /health` reports it (`cache: ok|unavailable|disabled`) without failing. Configured with `maxmemory`, `allkeys-lru` and no persistence.
+- Fail-open: Redis errors and timeouts (250 ms socket timeout) are logged and the request is served from Postgres; Redis is then skipped for `CACHE_RETRY_SECONDS` so an outage costs requests nothing. Redis is never required for correctness, and `GET /health` reports it (`cache: ok|unavailable|disabled`) without failing. Configured with `maxmemory`, `allkeys-lru` and no persistence, and password-protected (`REDIS_PASSWORD`, required; it is passed in a private config file, not on the command line).
 
 **Exports:**
 - Each export records the dataset version it was built from. `POST /exports` returns the existing job (`200`, not `202`) if a succeeded export for the current version still has its file, or an export requested at the current version is queued or running; otherwise it queues a new one (`202`). The decision runs under an advisory lock, so concurrent requests share one job.

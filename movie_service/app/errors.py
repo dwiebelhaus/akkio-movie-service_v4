@@ -8,11 +8,16 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from psycopg.errors import QueryCanceled
+from psycopg_pool import PoolTimeout
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.schemas import ErrorDetail, ErrorResponse
 
 logger = logging.getLogger(__name__)
+
+# Sent with 503s for an overloaded database: a retry soon is likely to succeed.
+DB_RETRY_AFTER_SECONDS = 5
 
 
 class ApiError(Exception):
@@ -54,6 +59,23 @@ async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResp
     return error_response(422, "validation_error", "Request validation failed", details)
 
 
+async def _query_timeout(request: Request, exc: QueryCanceled) -> JSONResponse:
+    # Statement timeout (STATEMENT_TIMEOUT_MS): the query was too slow, not the request wrong.
+    logger.warning("query timed out on %s %s: %s", request.method, request.url.path, exc)
+    return error_response(
+        503, "query_timeout", "The database took too long to answer; retry later",
+        headers={"Retry-After": str(DB_RETRY_AFTER_SECONDS)},
+    )
+
+
+async def _pool_timeout(request: Request, exc: PoolTimeout) -> JSONResponse:
+    logger.warning("no database connection for %s %s: %s", request.method, request.url.path, exc)
+    return error_response(
+        503, "database_busy", "No database connection available; retry later",
+        headers={"Retry-After": str(DB_RETRY_AFTER_SECONDS)},
+    )
+
+
 async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:
     # Details go to the logs, never to the client.
     logger.exception("unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
@@ -64,4 +86,6 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(ApiError, _api_error)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
+    app.add_exception_handler(QueryCanceled, _query_timeout)
+    app.add_exception_handler(PoolTimeout, _pool_timeout)
     app.add_exception_handler(Exception, _unhandled_error)

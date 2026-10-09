@@ -4,6 +4,7 @@ Each test creates its own uniquely named genres, so filters isolate its movies f
 everything else in the shared test database.
 """
 
+import base64
 import time
 import uuid
 
@@ -108,6 +109,38 @@ def test_unknown_movie_is_404(client):
     assert resp.json()["error"]["code"] == "movie_not_found"
 
 
+
+@pytest.mark.parametrize(
+    "path", ["/api/v1/movies/{}", "/api/v1/jobs/{}", "/api/v1/jobs/{}/events", "/api/v1/exports/{}/file"]
+)
+@pytest.mark.parametrize("value", [0, 2**63, 10**30])
+def test_ids_outside_the_bigint_range_are_422(client, path, value):
+    """Larger ids would be compared as numeric, which can't use the primary key index."""
+    resp = client.get(path.format(value))
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "validation_error"
+
+
+def test_if_none_match_star_needs_an_existing_movie(client, catalog):
+    a, _ = catalog
+    movie = search(client, genre=a, limit=1)["items"][0]
+    assert client.get(f"/api/v1/movies/{movie['id']}", headers={"If-None-Match": "*"}).status_code == 304
+    missing = client.get("/api/v1/movies/999999999", headers={"If-None-Match": "*"})
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "movie_not_found"
+
+
+def test_query_over_the_statement_timeout_is_503(client, db):
+    """A query past STATEMENT_TIMEOUT_MS (5s) is an overloaded database, not a 500."""
+    with db.transaction():
+        db.execute("lock table movies in access exclusive mode")
+        started = time.monotonic()
+        resp = client.get("/api/v1/movies/999999998")
+    assert 4 < time.monotonic() - started < 20
+    assert resp.status_code == 503
+    assert resp.headers["retry-after"] == "5"
+    assert resp.json()["error"]["code"] == "query_timeout"
+
 @pytest.mark.parametrize(
     ("params", "code"),
     [
@@ -119,6 +152,8 @@ def test_unknown_movie_is_404(client):
         ({"genre_match": "some"}, "validation_error"),
         ({"genres": "Drama"}, "validation_error"),  # unknown parameter, likely a typo
         ({"cursor": "not-a-cursor!"}, "invalid_cursor"),
+        # Past the bigint range: would be compared as numeric, without the index.
+        ({"cursor": base64.urlsafe_b64encode(str(2**63).encode()).decode()}, "invalid_cursor"),
         ({"genre": "No Such Genre"}, "unknown_genre"),
     ],
 )

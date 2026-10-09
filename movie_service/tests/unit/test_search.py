@@ -52,9 +52,20 @@ def test_filter_rejects_unknown_fields():
         ('"v1-abc"', True),
         ('W/"v1-abc"', True),
         ('"v0-xyz", "v1-abc"', True),
-        ("*", True),
+        ("*", False),  # handled by cached_json, once the resource is known to exist
         ('"v2-abc"', False),
     ],
 )
 def test_etag_matching(header, matches):
     assert _etag_matches(header, '"v1-abc"') is matches
+
+
+@pytest.mark.parametrize("movie_id", [2**63, 10**30])
+def test_cursor_beyond_bigint_is_invalid(movie_id):
+    with pytest.raises(ApiError) as exc:
+        decode_cursor(encode_cursor(movie_id))
+    assert exc.value.code == "invalid_cursor"
+
+
+def test_cursor_at_bigint_max_is_valid():
+    assert decode_cursor(encode_cursor(2**63 - 1)) == 2**63 - 1

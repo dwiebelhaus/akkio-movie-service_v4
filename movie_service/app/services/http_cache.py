@@ -21,10 +21,9 @@ async def dataset_version(hub: JobEventHub, pool: AsyncConnectionPool) -> int:
 
 
 def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """Whether If-None-Match lists `etag` (`*` is handled by the caller)."""
     if not if_none_match:
         return False
-    if if_none_match.strip() == "*":
-        return True
     # Weak comparison (RFC 9110 §13.1.2): ignore W/ prefixes.
     tags = {t.strip().removeprefix("W/") for t in if_none_match.split(",")}
     return etag in tags
@@ -43,12 +42,14 @@ async def cached_json(
     """Serve a JSON body identified by (scope, params) at a dataset version.
 
     Order: a matching If-None-Match gets 304 with no work; then the shared cache; then
-    `produce()` (the database), whose result is stored in the cache.
+    `produce()` (the database), whose result is stored in the cache. `If-None-Match: *` only
+    matches a resource that exists, so it gets its 304 after the body is found.
     """
     digest = hashlib.sha256(json.dumps([scope, params], sort_keys=True).encode()).hexdigest()[:24]
     etag = f'"v{version}-{digest}"'
     headers = {"ETag": etag, "Cache-Control": f"public, max-age={max_age}"}
-    if _etag_matches(request.headers.get("if-none-match"), etag):
+    if_none_match = request.headers.get("if-none-match")
+    if _etag_matches(if_none_match, etag):
         return Response(status_code=304, headers=headers)
 
     key = f"movies:v{version}:{digest}"
@@ -59,4 +60,6 @@ async def cached_json(
         headers["X-Cache"] = "MISS"
     else:
         headers["X-Cache"] = "HIT"
+    if if_none_match and if_none_match.strip() == "*":
+        return Response(status_code=304, headers=headers)
     return Response(content=body, media_type="application/json", headers=headers)

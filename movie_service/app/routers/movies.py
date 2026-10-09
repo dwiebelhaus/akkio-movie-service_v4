@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Request, Response
 
-from app.dependencies import Cache, Catalog, Hub, Pool, SettingsDep
+from app.dependencies import Cache, Catalog, Hub, IdPath, Pool, SettingsDep
 from app.errors import ApiError
 from app.schemas import ErrorResponse, MovieFilter, MovieRead, Page
 from app.services.http_cache import cached_json, dataset_version
@@ -58,7 +58,7 @@ async def list_movies(
     responses={**_cached, 404: {"model": ErrorResponse}},
 )
 async def read_movie(
-    request: Request, movie_id: int, pool: Pool, hub: Hub, cache: Cache, settings: SettingsDep
+    request: Request, movie_id: IdPath, pool: Pool, hub: Hub, cache: Cache, settings: SettingsDep
 ) -> Response:
     """One movie by id."""
     version = await dataset_version(hub, pool)
