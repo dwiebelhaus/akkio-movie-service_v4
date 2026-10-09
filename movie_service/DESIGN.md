@@ -158,8 +158,8 @@ Versioned under `/api/v1` (except `GET /health`, which stays at the root for loa
 | `POST` | `/imports` | Upload a CSV (multipart). Streamed to storage; an import job is queued. Needs API key. | `202` + `JobRead`, `Location: /jobs/{id}` |
 | `GET` | `/movies` | Search (R3). Cached (§13). | `200` / `304` + `Page[MovieRead]` |
 | `GET` | `/movies/{movie_id}` | Get one movie. Cached (§13). | `200` / `304` / `404` |
-| `POST` | `/exports` | Start a gzipped CSV export of the whole database (R4), or reuse a finished one for the current dataset version (§13). Needs API key. | `202` + `JobRead` |
-| `GET` | `/exports/{job_id}/file` | Download the finished export (`application/gzip`). | `200` / `409` if not ready |
+| `POST` | `/exports` | Start a gzipped CSV export of the whole database (R4), or reuse a finished or running one for the current dataset version (§13). Needs API key. | `202` new / `200` reused, + `JobRead`, `Location` |
+| `GET` | `/exports/{job_id}/file` | Download the finished export (`application/gzip`). | `200` / `409` not ready or failed / `410` replaced |
 | `GET` | `/jobs/{job_id}` | Job status snapshot. | `200` + `JobRead` |
 | `GET` | `/jobs/{job_id}/events` | Live progress via server-sent events (R5). | `text/event-stream` |
 | `GET` | `/health` | Liveness and database check. | `200` / `503` |
@@ -219,7 +219,14 @@ Concurrent imports are serialized with a Postgres advisory lock, so merges never
 
 ## 9. Export pipeline (R4)
 
-The worker runs `COPY (SELECT title, year, genres, rating …) TO STDOUT`, streaming through gzip into storage with constant memory. The CSV columns match the input format, so an export can be re-imported. `GET /exports/{id}/file` streams the finished file.
+1. The worker opens a `REPEATABLE READ, READ ONLY` transaction, so the row count, the dataset version and the rows all come from one consistent snapshot while imports keep running.
+2. `COPY (…) TO STDOUT WITH (FORMAT csv, HEADER)` streams `movie_name,year,genres,rating` in id order. Genres come from `movie_genres` (the source of truth) through one grouped join; a per-row lateral subquery took 8s instead of 0.65s on the sample.
+3. Rows are gzipped (level 6) in a thread in 1 MB chunks into `exports/{id}.csv.gz.part`, then moved into place atomically, so a crash never leaves a half-written file that looks finished. Progress is rows written over the snapshot's movie count.
+4. The result records `rows`, `bytes`, `dataset_version` and `download_url`. Only the newest export file is kept; older downloads return `410 Gone`.
+
+The CSV matches the input format (empty fields for missing year, genres or rating), so an export re-imports with zero changes. On the sample it takes about 1.4s and produces 3.3 MB.
+
+`GET /exports/{id}/file` streams the file (`application/gzip`, `Content-Disposition: attachment`, `Content-Length`). It returns `409` while the export is queued or running, or if it failed, and `410` once a newer export has replaced it.
 
 ## 10. Error handling
 
@@ -237,6 +244,7 @@ The worker runs `COPY (SELECT title, year, genres, rating …) TO STDOUT`, strea
 | `up` | `docker compose up -d --build --wait`, print the API URL. `--seed` imports the sample `movies.csv` and shows progress. |
 | `test` | Run `pytest`. The pytest-docker fixtures start an isolated Compose project (unique project name and ports) and tear it down afterwards. |
 | `up --test` | Start the services, then run the test suite (end-to-end tests still use their own isolated stack, so they never touch your data). |
+| `export [-o FILE]` | Request an export (or reuse the current one), show progress, and download it. |
 | `down` | Stop the services; `--volumes` also wipes the data. |
 | `logs` | Follow the service logs. |
 
@@ -281,7 +289,7 @@ Everything keys on the **dataset version** (`dataset_state.version`). An import 
 - Fail-open: Redis errors and timeouts (250 ms socket timeout) are logged and the request is served from Postgres; Redis is then skipped for `CACHE_RETRY_SECONDS` so an outage costs requests nothing. Redis is never required for correctness, and `GET /health` reports it (`cache: ok|unavailable|disabled`) without failing. Configured with `maxmemory`, `allkeys-lru` and no persistence.
 
 **Exports:**
-- Each export records the dataset version it was built from. `POST /exports` returns the existing job (`200`, not `202`) if a succeeded export for the current version still has its file, or an in-progress export for the current version is running; otherwise it queues a new one (`202`).
+- Each export records the dataset version it was built from. `POST /exports` returns the existing job (`200`, not `202`) if a succeeded export for the current version still has its file, or an export requested at the current version is queued or running; otherwise it queues a new one (`202`). The decision runs under an advisory lock, so concurrent requests share one job.
 
 **Database:** Postgres's own buffer cache handles hot index pages; no extra tuning beyond sensible `shared_buffers`.
 

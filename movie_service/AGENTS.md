@@ -27,12 +27,12 @@ FastAPI movie database service
 - `app/errors.py` — `ApiError` and handlers that give every error the `ErrorResponse` shape.
 - `app/db/` — connection pool, `migrate.py`, and plain-SQL migrations in `migrations/NNN_name.sql` (applied in order at startup; never edit an applied migration, add a new one).
 - `app/routers/` — one router per resource (`health.py`, `imports.py`, `jobs.py`, `movies.py`, ...).
-- `app/services/` — business logic: search (`movie_search.py`), caching (`cache.py` for Redis, `http_cache.py` for ETag/304), CSV parsing (`csv_import.py`), upload streaming (`uploads.py`), import merge (`importer.py`), job queue (`jobs.py`), notification fan-out for SSE (`job_events.py`), file storage (`storage.py`).
+- `app/services/` — business logic: search (`movie_search.py`), caching (`cache.py` for Redis, `http_cache.py` for ETag/304), CSV parsing (`csv_import.py`), upload streaming (`uploads.py`), import merge (`importer.py`), export (`exporter.py`), job queue (`jobs.py`), notification fan-out for SSE (`job_events.py`), file storage (`storage.py`).
 - `app/worker/` — job worker (`python -m app.worker`); runs as its own container.
 - `app/domain/` — Domain classes (plain dataclasses and enums, e.g. `Movie`, `JobStatus`), independent of the API layer.
 - `app/schemas/` — Pydantic models, one file per schema, re-exported from `app/schemas/__init__.py`.
 - `tests/unit/` — fast tests, no Docker. `tests/e2e/` — real HTTP requests with `httpx` against an isolated Docker Compose stack started by pytest-docker.
-- `run.py` — one-command runner (`up`, `test`, `down`, `logs`); `docker-compose.yml`, `Dockerfile`, `.env.example`.
+- `run.py` — one-command runner (`up [--seed] [--test]`, `export`, `test`, `down`, `logs`); `docker-compose.yml`, `Dockerfile`, `.env.example`.
 - `movies.csv` — sample data. Columns: `movie_name,year,genres,rating`. `genres` is a comma-separated quoted string; `rating` may be empty.
 
 ## Commands
@@ -43,6 +43,7 @@ Python is pinned to 3.13 via `.python-version` (`pydantic-core` has no 3.14 whee
 uv sync                          # install dependencies
 uv run fastapi dev                # run dev server, docs at localhost:8000/docs (needs a reachable Postgres via DATABASE_URL)
 uv run python run.py up          # build and start the full stack in Docker
+uv run python run.py export      # download the database as movies-export.csv.gz
 uv run python run.py test        # run all tests (extra args go to pytest, e.g. `tests/unit -q`)
 uv run python run.py down        # stop the stack (`--volumes` wipes data)
 uv add <package>                 # add a dependency (never edit uv.lock by hand)

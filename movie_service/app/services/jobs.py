@@ -5,6 +5,7 @@ Notifications sent inside a transaction are delivered when it commits.
 """
 
 import json
+import time
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -25,16 +26,21 @@ async def _notify(conn: AsyncConnection, channel: str, payload: Any) -> None:
     await conn.execute("select pg_notify(%s, %s)", (channel, str(payload)))
 
 
+async def insert_job(conn: AsyncConnection, type_: JobType, params: dict) -> dict:
+    """Queue a job on the caller's connection, so it can share the caller's transaction."""
+    cur = conn.cursor(row_factory=dict_row)
+    await cur.execute(
+        f"insert into jobs (type, params) values (%s, %s) returning {JOB_COLUMNS}",
+        (type_.value, json.dumps(params)),
+    )
+    job = await cur.fetchone()
+    await _notify(conn, QUEUE_CHANNEL, job["id"])
+    return job
+
+
 async def create_job(pool: AsyncConnectionPool, type_: JobType, params: dict) -> dict:
     async with pool.connection() as conn:
-        cur = conn.cursor(row_factory=dict_row)
-        await cur.execute(
-            f"insert into jobs (type, params) values (%s, %s) returning {JOB_COLUMNS}",
-            (type_.value, json.dumps(params)),
-        )
-        job = await cur.fetchone()
-        await _notify(conn, QUEUE_CHANNEL, job["id"])
-    return job
+        return await insert_job(conn, type_, params)
 
 
 async def get_job(pool: AsyncConnectionPool, job_id: int) -> dict | None:
@@ -140,3 +146,21 @@ async def fail_stale_jobs(pool: AsyncConnectionPool, stale_seconds: float) -> li
         for job in stale:
             await _notify(conn, PROGRESS_CHANNEL, job["id"])
     return stale
+
+
+class ProgressReporter:
+    """Throttled progress writes (at most one per interval) on their own connection,
+    so they are visible while the job's own transaction is still open."""
+
+    def __init__(self, pool: AsyncConnectionPool, job_id: int, interval: float):
+        self._pool = pool
+        self._job_id = job_id
+        self._interval = interval
+        self._last = 0.0
+
+    async def update(self, progress: float, processed_rows: int, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last < self._interval:
+            return
+        self._last = now
+        await report_progress(self._pool, self._job_id, progress, processed_rows)
