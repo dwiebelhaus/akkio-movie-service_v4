@@ -26,8 +26,10 @@ FastAPI movie database service
 - `app/config.py` — settings from env vars (pydantic-settings).
 - `app/errors.py` — `ApiError` and handlers that give every error the `ErrorResponse` shape.
 - `app/db/` — connection pool, `migrate.py`, and plain-SQL migrations in `migrations/NNN_name.sql` (applied in order at startup; never edit an applied migration, add a new one).
-- `app/routers/` — one router per resource (`health.py`, `movies.py`, ...).
-- `app/domain/` — Domain classes (plain dataclasses, e.g. `Movie`), independent of the API layer.
+- `app/routers/` — one router per resource (`health.py`, `imports.py`, `jobs.py`, `movies.py`, ...).
+- `app/services/` — business logic: CSV parsing (`csv_import.py`), upload streaming (`uploads.py`), import merge (`importer.py`), job queue (`jobs.py`), notification fan-out for SSE (`job_events.py`), file storage (`storage.py`).
+- `app/worker/` — job worker (`python -m app.worker`); runs as its own container.
+- `app/domain/` — Domain classes (plain dataclasses and enums, e.g. `Movie`, `JobStatus`), independent of the API layer.
 - `app/schemas/` — Pydantic models, one file per schema, re-exported from `app/schemas/__init__.py` (`MoviesQuery` is a starter example; update it, e.g. `genres: list[str]`, integer years).
 - `tests/unit/` — fast tests, no Docker. `tests/e2e/` — real HTTP requests with `httpx` against an isolated Docker Compose stack started by pytest-docker.
 - `run.py` — one-command runner (`up`, `test`, `down`, `logs`); `docker-compose.yml`, `Dockerfile`, `.env.example`.

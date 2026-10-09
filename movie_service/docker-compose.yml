@@ -8,6 +8,9 @@ x-app-env: &app-env
   STATEMENT_TIMEOUT_MS: ${STATEMENT_TIMEOUT_MS:-5000}
   DATA_DIR: /data
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-5}
+  JOB_STALE_SECONDS: ${JOB_STALE_SECONDS:-60}
+  JOB_SWEEP_INTERVAL_SECONDS: ${JOB_SWEEP_INTERVAL_SECONDS:-15}
 
 services:
   postgres:
@@ -41,6 +44,19 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment: *app-env
+    volumes:
+      - data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 30s
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
 
 volumes:
   pgdata:

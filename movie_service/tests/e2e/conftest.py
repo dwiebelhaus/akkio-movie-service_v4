@@ -10,13 +10,25 @@ import uuid
 from pathlib import Path
 
 import httpx
+import psycopg
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 API_KEY = "test-api-key"
 
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # fits the 16.6 MB sample; small enough for quick 413 tests
+
 # Compose reads these when pytest-docker runs `docker compose up`; they override any `.env`.
-os.environ.update(API_PORT="0", POSTGRES_PORT="0", API_KEY=API_KEY)
+os.environ.update(
+    API_PORT="0",
+    POSTGRES_PORT="0",
+    API_KEY=API_KEY,
+    MAX_UPLOAD_BYTES=str(MAX_UPLOAD_BYTES),
+    # Fast crash detection so the stale-job sweep can be tested in seconds.
+    JOB_HEARTBEAT_SECONDS="1",
+    JOB_STALE_SECONDS="4",
+    JOB_SWEEP_INTERVAL_SECONDS="1",
+)
 
 
 @pytest.fixture(scope="session")
@@ -57,3 +69,17 @@ def client(api_url: str):
 @pytest.fixture(scope="session")
 def auth_headers() -> dict[str, str]:
     return {"X-API-Key": API_KEY}
+
+
+@pytest.fixture(scope="session")
+def db_url(docker_ip: str, docker_services, api_url: str) -> str:
+    """Direct database access, for setting up states the API can't produce (e.g. a dead worker)
+    and for integrity checks. `api_url` is required so migrations have run."""
+    port = docker_services.port_for("postgres", 5432)
+    return f"postgresql://movies:movies@{docker_ip}:{port}/movies"
+
+
+@pytest.fixture
+def db(db_url: str):
+    with psycopg.connect(db_url, autocommit=True) as conn:
+        yield conn
