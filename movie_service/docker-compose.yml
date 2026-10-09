@@ -1,4 +1,6 @@
 # Host ports come from env vars so parallel worktrees / test runs don't collide (0 = random).
+# Postgres is only for debugging from the host: localhost-only, random port unless POSTGRES_PORT
+# is set. `run.py up` picks a free API port (8000 if available) unless API_PORT is set.
 # Set COMPOSE_PROJECT_NAME (or `-p`) per worktree.
 
 x-app-env: &app-env
@@ -26,7 +28,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-0}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 2s
