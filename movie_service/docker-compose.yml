@@ -11,6 +11,10 @@ x-app-env: &app-env
   JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-5}
   JOB_STALE_SECONDS: ${JOB_STALE_SECONDS:-60}
   JOB_SWEEP_INTERVAL_SECONDS: ${JOB_SWEEP_INTERVAL_SECONDS:-15}
+  REDIS_URL: redis://redis:6379/0
+  CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-3600}
+  CACHE_MAX_AGE_SECONDS: ${CACHE_MAX_AGE_SECONDS:-3600}
+  CACHE_RETRY_SECONDS: ${CACHE_RETRY_SECONDS:-10}
 
 services:
   postgres:
@@ -29,6 +33,17 @@ services:
       timeout: 3s
       retries: 30
 
+  # Cache only (DESIGN.md §13): no persistence, bounded memory, LRU eviction.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "${REDIS_MAXMEMORY:-256mb}", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   api:
     build: .
     environment: *app-env
@@ -39,6 +54,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # The API runs without Redis (fail-open); this only orders startup.
+      redis:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
       interval: 3s

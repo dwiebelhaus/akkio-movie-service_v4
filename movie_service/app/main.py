@@ -8,7 +8,9 @@ from app.db.migrate import migrate
 from app.db.pool import create_pool
 from app.errors import register_error_handlers
 from app.routers import health, imports, jobs, movies
+from app.services.cache import ResponseCache
 from app.services.job_events import JobEventHub
+from app.services.movie_search import GenreCatalog
 from app.services.storage import LocalStorage
 
 API_PREFIX = "/api/v1"
@@ -27,9 +29,12 @@ async def lifespan(app: FastAPI):
     app.state.pool = pool
     app.state.hub = hub
     app.state.storage = LocalStorage(settings.data_dir)
+    app.state.cache = ResponseCache(settings.redis_url, settings.cache_ttl_seconds, settings.cache_retry_seconds)
+    app.state.catalog = GenreCatalog()
     try:
         yield
     finally:
+        await app.state.cache.close()
         await hub.stop()
         await pool.close()
 

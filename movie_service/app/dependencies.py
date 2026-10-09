@@ -7,7 +7,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from app.config import Settings, get_settings
 from app.errors import ApiError
+from app.services.cache import ResponseCache
 from app.services.job_events import JobEventHub
+from app.services.movie_search import GenreCatalog
 from app.services.storage import Storage
 
 
@@ -23,10 +25,20 @@ def get_hub(request: Request) -> JobEventHub:
     return request.app.state.hub
 
 
+def get_cache(request: Request) -> ResponseCache:
+    return request.app.state.cache
+
+
+def get_catalog(request: Request) -> GenreCatalog:
+    return request.app.state.catalog
+
+
 Pool = Annotated[AsyncConnectionPool, Depends(get_pool)]
 StorageDep = Annotated[Storage, Depends(get_storage)]
 Hub = Annotated[JobEventHub, Depends(get_hub)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+Cache = Annotated[ResponseCache, Depends(get_cache)]
+Catalog = Annotated[GenreCatalog, Depends(get_catalog)]
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
