@@ -154,7 +154,7 @@ Import results report `inserted`, `updated`, `unchanged`, `duplicates_in_file` a
 
 Versioned under `/api/v1` (except `GET /health`, which stays at the root for load balancers and orchestrators). Plural nouns, standard status codes, JSON errors.
 
-**Authentication:** write endpoints (`POST /imports`, `POST /exports`) need an `X-API-Key` header that matches the `API_KEY` env var (constant-time comparison). Read endpoints (search, job status and events, export download) are open. A missing or wrong key returns `401`. The check is a FastAPI dependency, so it can later be replaced by OAuth or an API gateway.
+**Authentication:** write endpoints (`POST /imports`, `POST /exports`) need an `X-API-Key` header that matches the `API_KEY` env var (constant-time comparison). `API_KEY` has no default: the API and worker refuse to start without a key of at least 16 characters (`run.py up` generates one into `.env`; see the root README.md). Read endpoints (search, job status and events, export download) are open. A missing or wrong key returns `401`. The check is a FastAPI dependency, so it can later be replaced by OAuth or an API gateway.
 
 | Method | Path | Purpose | Response |
 |---|---|---|---|

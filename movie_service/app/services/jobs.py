@@ -22,6 +22,14 @@ QUEUE_CHANNEL = "job_queued"
 PROGRESS_CHANNEL = "job_progress"
 
 
+class JobNotRunningError(Exception):
+    """A worker tried to finish a job that is no longer `running`; its result is discarded."""
+
+    def __init__(self, job_id: int):
+        super().__init__(f"job {job_id} is no longer running")
+        self.job_id = job_id
+
+
 async def _notify(conn: AsyncConnection, channel: str, payload: Any) -> None:
     await conn.execute("select pg_notify(%s, %s)", (channel, str(payload)))
 
@@ -94,16 +102,23 @@ async def heartbeat(pool: AsyncConnectionPool, job_id: int) -> None:
 async def mark_succeeded(
     conn: AsyncConnection, job_id: int, result: dict, processed_rows: int | None
 ) -> None:
-    """Finish a job; pass the connection so it can share the caller's transaction."""
-    await conn.execute(
+    """Finish a job; pass the connection so it can share the caller's transaction.
+
+    Raises `JobNotRunningError` if the job is no longer running (e.g. the stale-job sweep
+    already failed it), so the caller's transaction rolls back instead of committing work
+    that clients were told failed.
+    """
+    cur = await conn.execute(
         """
         update jobs
            set status = 'succeeded', progress = 1, processed_rows = %s, total_rows = %s,
                result = %s, finished_at = clock_timestamp()
-         where id = %s
+         where id = %s and status = 'running'
         """,
         (processed_rows, processed_rows, json.dumps(result), job_id),
     )
+    if cur.rowcount == 0:
+        raise JobNotRunningError(job_id)
     await _notify(conn, PROGRESS_CHANNEL, job_id)
 
 
@@ -111,7 +126,7 @@ async def mark_failed(pool: AsyncConnectionPool, job_id: int, error: str, result
     async with pool.connection() as conn:
         await conn.execute(
             "update jobs set status = 'failed', error = %s, result = %s, finished_at = now()"
-            " where id = %s",
+            " where id = %s and status = 'running'",
             (error, json.dumps(result) if result is not None else None, job_id),
         )
         await _notify(conn, PROGRESS_CHANNEL, job_id)

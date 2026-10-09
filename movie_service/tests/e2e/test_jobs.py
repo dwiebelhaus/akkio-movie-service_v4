@@ -2,7 +2,7 @@
 
 import time
 
-from tests.e2e.helpers import follow_events, make_csv, unique_prefix, upload
+from tests.e2e.helpers import follow_events, import_and_wait, make_csv, unique_prefix, upload
 
 
 def test_sse_streams_progress_then_final_event(client, auth_headers):
@@ -68,3 +68,33 @@ def test_job_with_dead_worker_is_failed_and_stream_closes(client, db):
     name, job = events[-1]
     assert name == "failed"
     assert job["error"] == "Worker stopped responding"
+
+
+def test_job_failed_while_running_is_not_committed(client, auth_headers, db):
+    """If the stale-job sweep fails a job that is in fact still running (e.g. its heartbeats were
+    delayed), the worker must not flip it to succeeded later, nor commit its data."""
+    p = unique_prefix()
+    content = make_csv([[f"{p}Movie {i}", str(1950 + i % 70), "Drama", "6.1"] for i in range(300_000)])
+    job_id = upload(client, content, auth_headers).json()["id"]
+
+    deadline = time.monotonic() + 30
+    while db.execute("select status from jobs where id = %s", (job_id,)).fetchone()[0] != "running":
+        assert time.monotonic() < deadline, "job never started"
+        time.sleep(0.02)
+    # Exactly what the sweep does to a job it believes is dead.
+    swept = db.execute(
+        "update jobs set status = 'failed', error = 'Worker stopped responding', finished_at = now()"
+        " where id = %s and status = 'running'",
+        (job_id,),
+    ).rowcount
+    assert swept == 1
+
+    # One worker runs jobs in order, so once a later job is done, the swept one has finished too.
+    import_and_wait(client, make_csv([[f"{p}Sentinel", "2000", "Drama", "5"]]), auth_headers)
+
+    job = client.get(f"/api/v1/jobs/{job_id}").json()
+    assert job["status"] == "failed"
+    assert job["error"] == "Worker stopped responding"
+    assert job["result"] is None
+    inserted = db.execute("select count(*) from movies where title like %s", (f"{p}Movie %",)).fetchone()[0]
+    assert inserted == 0

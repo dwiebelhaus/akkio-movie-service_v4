@@ -119,8 +119,12 @@ async def run_export(pool: AsyncConnectionPool, storage: Storage, settings: Sett
         "dataset_version": version,
         "download_url": download_path(job_id),
     }
-    async with pool.connection() as conn:
-        await jobs.mark_succeeded(conn, job_id, result, movies)
+    try:
+        async with pool.connection() as conn:
+            await jobs.mark_succeeded(conn, job_id, result, movies)
+    except jobs.JobNotRunningError:
+        await asyncio.to_thread(storage.delete, final_key)
+        raise
     await _delete_older_exports(pool, storage, job_id)
     logger.info("export job %s finished in %.1fs: %s", job_id, time.monotonic() - started, result)
     return result
