@@ -37,25 +37,29 @@ There is no natural unique ID in the data; titles alone are not unique (81,538 t
 ## 3. Architecture
 
 ```
-            ┌──────────────┐        ┌───────────────┐
- client ──▶ │  api (N)     │──SQL──▶│               │
-   ▲        │  FastAPI     │◀─NOTIFY│   postgres    │
-   │ SSE    └──────┬───────┘        │               │
-   └───────────────┘   ▲            │  movies       │
-                       │ files      │  genres       │
-            ┌──────────┴───┐        │  jobs  …      │
-            │  worker (M)  │──SQL──▶│               │
-            └──────────────┘        └───────────────┘
+                              ┌─────────┐
+                              │  redis  │  search-result cache
+                              └────▲────┘
+            ┌──────────────┐       │        ┌───────────────┐
+ client ──▶ │  api (N)     │───────┴─SQL───▶│               │
+   ▲        │  FastAPI     │◀────NOTIFY─────│   postgres    │
+   │ SSE    └──────┬───────┘                │               │
+   └───────────────┘   ▲                    │  movies       │
+   ETag / 304          │ files              │  genres       │
+            ┌──────────┴───┐                │  jobs  …      │
+            │  worker (M)  │──────SQL──────▶│               │
+            └──────────────┘                └───────────────┘
                  shared volume: /data (uploads, exports)
 ```
 
-Three containers, run with Docker Compose:
+Four containers, run with Docker Compose:
 
 - **api**: FastAPI app. Stateless, so it can be scaled to N replicas. Handles requests, accepts uploads, enqueues jobs and streams progress. Never does long-running work itself.
 - **worker**: runs imports and exports. Scales independently of the API.
-- **postgres**: data, plus the job queue and progress notifications.
+- **postgres**: data, plus the job queue and progress notifications. The source of truth.
+- **redis**: a shared cache of search results (§13). Optional at runtime: if it is down, the API serves from Postgres.
 
-**Job queue:** a `jobs` table in Postgres. Workers claim jobs with `SELECT … FOR UPDATE SKIP LOCKED`. Progress updates are written to the row and broadcast with `NOTIFY`. This keeps jobs durable across restarts without adding Redis.
+**Job queue:** a `jobs` table in Postgres. Workers claim jobs with `SELECT … FOR UPDATE SKIP LOCKED`. Progress updates are written to the row and broadcast with `NOTIFY`. This keeps jobs durable across restarts; Redis is used only as a cache, never for jobs.
 
 **File storage:** uploads and exports live on a shared volume behind a small `Storage` interface (`LocalStorage` now, with S3/GCS possible later), so the design stays cloud-agnostic.
 
@@ -112,9 +116,14 @@ jobs (
   status        text not null,          -- 'queued' | 'running' | 'succeeded' | 'failed'
   progress      real not null default 0, -- 0.0–1.0
   processed_rows bigint, total_rows bigint,
+  params        jsonb,                  -- job input, e.g. upload path; dataset version for exports
   result        jsonb,                  -- e.g. {inserted, updated, duplicates, rejected} or export file path
   error         text,
-  created_at, started_at, finished_at timestamptz
+  created_at, started_at, finished_at, heartbeat_at timestamptz
+)
+
+dataset_state (            -- single row
+  version  bigint not null  -- bumped by every import that changes data (§13)
 )
 ```
 
@@ -130,9 +139,9 @@ Indexes: `movies (year)`, `movie_genres (genre_id, movie_id)`, `jobs (status, cr
 - Same title and year with different genres stay separate films (e.g. the two *The Stranger* 2022 entries).
 - Missing years count as equal for matching (`NULLS NOT DISTINCT`, Postgres 15+).
 
-**When an import matches an existing movie:** the latest non-null rating wins, `last_import_id` is updated, and other fields are unchanged.
+**When an import matches an existing movie:** the latest non-null rating wins and other fields are unchanged. A row is only written when its rating actually changes (then `last_import_id` and `updated_at` are set), so re-importing the same file is nearly write-free and doesn't bump the dataset version.
 
-**Within a single file:** duplicate keys are collapsed in the staging table first, keeping the last row's rating.
+**Within a single file:** duplicate keys are collapsed in the staging table first, keeping the last non-null rating.
 
 Import results report `inserted`, `updated`, `unchanged`, `duplicates_in_file` and `rejected` counts.
 
@@ -145,9 +154,9 @@ Versioned under `/api/v1` (except `GET /health`, which stays at the root for loa
 | Method | Path | Purpose | Response |
 |---|---|---|---|
 | `POST` | `/imports` | Upload a CSV (multipart). Streamed to storage; an import job is queued. Needs API key. | `202` + `JobRead`, `Location: /jobs/{id}` |
-| `GET` | `/movies` | Search (R3). | `200` + `Page[MovieRead]` |
-| `GET` | `/movies/{movie_id}` | Get one movie. | `200` / `404` |
-| `POST` | `/exports` | Start a gzipped CSV export of the whole database (R4). Needs API key. | `202` + `JobRead` |
+| `GET` | `/movies` | Search (R3). Cached (§13). | `200` / `304` + `Page[MovieRead]` |
+| `GET` | `/movies/{movie_id}` | Get one movie. Cached (§13). | `200` / `304` / `404` |
+| `POST` | `/exports` | Start a gzipped CSV export of the whole database (R4), or reuse a finished one for the current dataset version (§13). Needs API key. | `202` + `JobRead` |
 | `GET` | `/exports/{job_id}/file` | Download the finished export (`application/gzip`). | `200` / `409` if not ready |
 | `GET` | `/jobs/{job_id}` | Job status snapshot. | `200` + `JobRead` |
 | `GET` | `/jobs/{job_id}/events` | Live progress via server-sent events (R5). | `text/event-stream` |
@@ -207,7 +216,7 @@ The worker runs `COPY (SELECT title, year, genres, rating …) TO STDOUT`, strea
 - Validation errors return `422`. A missing or invalid API key returns `401`. Missing resources return `404`. A job that isn't finished yet returns `409`. Oversized uploads return `413`.
 - Unhandled exceptions return `500` with a generic `ErrorResponse`. Details go to the logs, never to the client.
 - Every error uses the `ErrorResponse` shape.
-- Worker crashes leave a job in `running`. A heartbeat column plus a sweep re-queues or fails jobs whose worker stopped responding.
+- Worker crashes leave a job in `running`. Workers refresh `heartbeat_at` while running; a periodic sweep (any worker) marks jobs whose heartbeat is older than `JOB_STALE_SECONDS` as `failed` and notifies listeners, so SSE clients never wait forever. Failing (not re-queuing) avoids crash loops; imports are transactional, so a failed import leaves no partial data. On graceful shutdown (SIGTERM) a worker re-queues its current job.
 
 ## 11. Running and testing (R6)
 
@@ -244,6 +253,26 @@ Configuration comes from environment variables (`.env.example` provided), includ
 | SSE | `sse-starlette` | Handles keep-alive and disconnects. |
 | Tests | pytest, pytest-docker, httpx | End-to-end against real containers. |
 | Postgres | 16 | Needed for `NULLS NOT DISTINCT` (Postgres 15+). |
+| Cache | Redis 7 (`redis` asyncio client) | Shared across API replicas; key-versioned so it never needs explicit invalidation. |
+
+## 13. Caching
+
+Everything keys on the **dataset version** (`dataset_state.version`). An import bumps it in its merge transaction, only when it inserted or updated rows, and issues `NOTIFY dataset_changed`. Each API replica keeps the current version in memory (loaded at startup, updated from the notification), so checking it costs no query.
+
+**HTTP (all clients, CDNs, proxies):**
+- `GET /movies` and `GET /movies/{id}` return `ETag: "v{version}-{hash of normalized query}"` and `Cache-Control: public, max-age=3600` (`CACHE_MAX_AGE_SECONDS`).
+- A request with a matching `If-None-Match` gets `304 Not Modified` without touching Postgres or Redis.
+- Trade-off: with a one-hour `max-age`, clients and CDNs may serve results up to an hour old after an import without asking. Revalidation after that is cheap (`304`). Lower `CACHE_MAX_AGE_SECONDS` if fresher results matter more.
+
+**Redis (shared across API replicas):**
+- Search pages and single movies are cached as serialized JSON under `movies:v{version}:{query hash}` with a TTL (`CACHE_TTL_SECONDS`, default 1 hour).
+- A version bump makes old keys unreachable, so there is no explicit invalidation; the TTL reclaims memory.
+- Fail-open: Redis errors and timeouts (short socket timeout) are logged and the request is served from Postgres. Redis is never required for correctness. Configured with `maxmemory` and `allkeys-lru`.
+
+**Exports:**
+- Each export records the dataset version it was built from. `POST /exports` returns the existing job (`200`, not `202`) if a succeeded export for the current version still has its file, or an in-progress export for the current version is running; otherwise it queues a new one (`202`).
+
+**Database:** Postgres's own buffer cache handles hot index pages; no extra tuning beyond sensible `shared_buffers`.
 
 ## Decisions
 
@@ -257,6 +286,11 @@ Configuration comes from environment variables (`.env.example` provided), includ
 | D6 | CSV columns | Required columns must be present in any order. Extra columns are ignored and reported as warnings. |
 | D7 | Auth | An API key (`X-API-Key`) is required for writes only (`POST /imports`, `POST /exports`). Reads are open. |
 | D8 | Bad rows | Skipped and reported (count plus samples). Never fail the job; only file-level errors do. |
+| D9 | Cache invalidation | A dataset version bumped by imports that change data; every cache key includes it. |
+| D10 | HTTP caching | `ETag` + `If-None-Match` → `304` on movie reads, with `Cache-Control: public, max-age=3600` (configurable). |
+| D11 | Shared cache | Redis caches search results and single movies across replicas, versioned keys plus TTL, fail-open. Used only as a cache (jobs stay in Postgres, D4). |
+| D12 | Export reuse | `POST /exports` reuses a finished or in-progress export for the current dataset version. |
+| D13 | Crashed workers | Heartbeat plus sweep marks stale `running` jobs `failed`; graceful shutdown re-queues. |
 
 ## Open questions
 
