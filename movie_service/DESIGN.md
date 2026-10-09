@@ -138,7 +138,7 @@ Import results report `inserted`, `updated`, `unchanged`, `duplicates_in_file` a
 
 ## 6. API
 
-Versioned under `/api/v1`. Plural nouns, standard status codes, JSON errors.
+Versioned under `/api/v1` (except `GET /health`, which stays at the root for load balancers and orchestrators). Plural nouns, standard status codes, JSON errors.
 
 **Authentication:** write endpoints (`POST /imports`, `POST /exports`) need an `X-API-Key` header that matches the `API_KEY` env var (constant-time comparison). Read endpoints (search, job status and events, export download) are open. A missing or wrong key returns `401`. The check is a FastAPI dependency, so it can later be replaced by OAuth or an API gateway.
 
@@ -215,9 +215,9 @@ The worker runs `COPY (SELECT title, year, genres, rating …) TO STDOUT`, strea
 
 | Command | Action |
 |---|---|
-| `up` | `docker compose up -d --build`, wait for health checks, print the API URL. |
+| `up` | `docker compose up -d --build --wait`, print the API URL. `--seed` imports the sample `movies.csv` and shows progress. |
 | `test` | Run `pytest`. The pytest-docker fixtures start an isolated Compose project (unique project name and ports) and tear it down afterwards. |
-| `up --test` | Start the services, then run the tests against them. |
+| `up --test` | Start the services, then run the test suite (end-to-end tests still use their own isolated stack, so they never touch your data). |
 | `down` | Stop the services; `--volumes` also wipes the data. |
 | `logs` | Follow the service logs. |
 
@@ -225,7 +225,7 @@ Configuration comes from environment variables (`.env.example` provided), includ
 
 **Tests:**
 - Unit tests for parsing and normalization and for filter validation.
-- End-to-end tests per requirement against the real stack:
+- End-to-end tests per requirement: real HTTP requests with `httpx` against the real stack:
   - import, then search
   - re-import produces no duplicates
   - merge updates ratings
