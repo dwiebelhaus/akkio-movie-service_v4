@@ -1,5 +1,8 @@
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from psycopg.errors import QueryCanceled
+from psycopg_pool import PoolTimeout
 
 from app.errors import ApiError, register_error_handlers
 
@@ -15,6 +18,14 @@ def make_client() -> TestClient:
     @app.get("/conflict")
     async def conflict():
         raise ApiError(409, "job_not_ready", "Job is still running", {"status": "running"})
+
+    @app.get("/slow")
+    async def slow():
+        raise QueryCanceled("canceling statement due to statement timeout")
+
+    @app.get("/busy")
+    async def busy():
+        raise PoolTimeout("couldn't get a connection after 30.00 sec")
 
     @app.get("/items/{item_id}")
     async def item(item_id: int):
@@ -48,3 +59,12 @@ def test_validation_error_is_422_with_details():
     body = resp.json()["error"]
     assert body["code"] == "validation_error"
     assert body["details"][0]["loc"] == ["path", "item_id"]
+
+
+@pytest.mark.parametrize(("path", "code"), [("/slow", "query_timeout"), ("/busy", "database_busy")])
+def test_overloaded_database_is_503_with_retry_after(path, code):
+    resp = make_client().get(path)
+    assert resp.status_code == 503
+    assert resp.headers["retry-after"] == "5"
+    assert resp.json()["error"]["code"] == code
+    assert "statement" not in resp.text and "sec" not in resp.text

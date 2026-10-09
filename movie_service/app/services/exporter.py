@@ -23,12 +23,19 @@ logger = logging.getLogger(__name__)
 _REQUEST_LOCK_ID = 0x6578706F  # serializes "reuse or create" decisions for exports
 _WRITE_CHUNK = 1024 * 1024
 
+# CSV injection (OWASP): a name starting with = + - @ (after any `'`s) gets a leading `'`, so
+# spreadsheets show it as text instead of running it as a formula. The importer removes one
+# such `'` (`app.domain.movie.unescape_formula`), so an export still re-imports unchanged.
+_ESCAPE_FORMULA = r"regexp_replace({}, '^(''*[-=+@])', '''\1')"
+
 # Same columns as the import format, so an export can be re-imported unchanged.
-_COPY_EXPORT = """
+_COPY_EXPORT = f"""
 copy (
-    select m.title as movie_name, m.year, mg.genres, m.rating  -- null genres -> empty field
+    select {_ESCAPE_FORMULA.format("m.title")} as movie_name, m.year, mg.genres, m.rating
       from movies m
-      left join (select x.movie_id, string_agg(g.name, ', ' order by g.name) as genres
+      -- null genres -> empty field
+      left join (select x.movie_id,
+                        string_agg({_ESCAPE_FORMULA.format("g.name")}, ', ' order by g.name) as genres
                    from movie_genres x
                    join genres g on g.id = x.genre_id
                   group by x.movie_id) mg on mg.movie_id = m.id

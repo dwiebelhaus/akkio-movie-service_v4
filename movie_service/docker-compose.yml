@@ -14,7 +14,7 @@ x-app-env: &app-env
   JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-5}
   JOB_STALE_SECONDS: ${JOB_STALE_SECONDS:-60}
   JOB_SWEEP_INTERVAL_SECONDS: ${JOB_SWEEP_INTERVAL_SECONDS:-15}
-  REDIS_URL: redis://redis:6379/0
+  REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
   CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-3600}
   CACHE_MAX_AGE_SECONDS: ${CACHE_MAX_AGE_SECONDS:-3600}
   CACHE_RETRY_SECONDS: ${CACHE_RETRY_SECONDS:-10}
@@ -40,13 +40,25 @@ services:
       retries: 30
 
   # Cache only (DESIGN.md §13): no persistence, bounded memory, LRU eviction.
+  # Requires REDIS_PASSWORD (`run.py up` generates one) and refuses to start without it. The
+  # password goes in a private config file, not on the command line where `ps` would show it;
+  # the image's entrypoint then drops root and starts redis-server.
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no",
-              "--maxmemory", "${REDIS_MAXMEMORY:-256mb}", "--maxmemory-policy", "allkeys-lru"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command:
+      - sh
+      - -c
+      - |
+        test -n "$$REDIS_PASSWORD" || { echo "REDIS_PASSWORD is required" >&2; exit 1; }
+        umask 077
+        printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /data/redis.conf
+        exec docker-entrypoint.sh redis-server /data/redis.conf --save "" --appendonly no \
+          --maxmemory "${REDIS_MAXMEMORY:-256mb}" --maxmemory-policy allkeys-lru
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
       interval: 2s
       timeout: 3s
       retries: 30

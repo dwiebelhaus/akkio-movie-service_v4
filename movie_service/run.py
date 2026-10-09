@@ -82,19 +82,32 @@ def env_value(name: str, default: str) -> str:
     return default
 
 
+def write_env_secret(name: str) -> str:
+    """Generate a random secret into `.env` as `name` and return it."""
+    value = secrets.token_urlsafe(32)
+    env_file = ROOT / ".env"
+    lines = env_file.read_text().splitlines() if env_file.exists() else []
+    # Replace an empty `NAME=` line (as in .env.example) rather than adding a second one.
+    lines = [line for line in lines if line.partition("=")[0].strip() != name]
+    env_file.write_text("\n".join([*lines, f"{name}={value}"]) + "\n")
+    return value
+
+
 def ensure_api_key() -> None:
     """The services require API_KEY; if none is configured, generate one into `.env`."""
     if configured := env_value("API_KEY", ""):
         if len(configured) < MIN_API_KEY_LENGTH:
             raise SystemExit(f"API_KEY must be at least {MIN_API_KEY_LENGTH} characters; fix it in .env.")
         return
-    key = secrets.token_urlsafe(32)
-    env_file = ROOT / ".env"
-    lines = env_file.read_text().splitlines() if env_file.exists() else []
-    # Replace an empty `API_KEY=` line (as in .env.example) rather than adding a second one.
-    lines = [line for line in lines if line.partition("=")[0].strip() != "API_KEY"]
-    env_file.write_text("\n".join([*lines, f"API_KEY={key}"]) + "\n")
-    print(f"Generated an API key in {env_file.name} (API_KEY); send it as the X-API-Key header for writes.")
+    write_env_secret("API_KEY")
+    print("Generated an API key in .env (API_KEY); send it as the X-API-Key header for writes.")
+
+
+def ensure_redis_password() -> None:
+    """Redis requires REDIS_PASSWORD; if none is configured, generate one into `.env`."""
+    if not env_value("REDIS_PASSWORD", ""):
+        write_env_secret("REDIS_PASSWORD")
+        print("Generated a Redis password in .env (REDIS_PASSWORD).")
 
 
 def follow_job(client, job_id: int) -> tuple[str | None, dict]:
@@ -162,6 +175,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 def cmd_up(args: argparse.Namespace) -> int:
     ensure_api_key()
+    ensure_redis_password()
     compose("up", "-d", "--build", "--wait", env={**os.environ, "API_PORT": choose_api_port()})
     url = api_url()
     print(f"\nMovie API is up: {url}  (docs: {url}/docs)")

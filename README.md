@@ -58,7 +58,7 @@ Unknown genres and unknown query parameters return `422`.
 
 **Authentication:** the two write endpoints (`POST /imports` and `POST /exports`) need an `X-API-Key` header that matches the `API_KEY` setting. Read endpoints are open. See [API keys](#api-keys) for how keys are set up.
 
-**Status codes:** `401` for a missing or wrong API key, `404` for a missing resource, `409` for an export that isn't ready, `413` for an oversized upload, `422` for invalid input, `503` (with `Retry-After`) when an API process already has `MAX_EVENT_STREAMS` progress streams open, and a generic `500` for unexpected errors. Error details go to the logs, never to the client.
+**Status codes:** `401` for a missing or wrong API key, `404` for a missing resource, `409` for an export that isn't ready, `413` for an oversized upload, `422` for invalid input (including ids outside the 64-bit range), `503` (with `Retry-After`) when an API process already has `MAX_EVENT_STREAMS` progress streams open or a query exceeds `STATEMENT_TIMEOUT_MS`, and a generic `500` for unexpected errors. Error details go to the logs, never to the client.
 
 ## Tech stack
 
@@ -110,11 +110,12 @@ cd akkio-movie-service_v4/movie_service
 uv sync
 ```
 
-**Configuration (optional).** The defaults work without changes, except `API_KEY`, which has no default; `run.py up` generates one for you (see [API keys](#api-keys)). To override settings, copy `.env.example` to `.env` and edit it. The most useful settings are:
+**Configuration (optional).** The defaults work without changes, except `API_KEY` and `REDIS_PASSWORD`, which have no defaults; `run.py up` generates both for you (see [API keys](#api-keys)). To override settings, copy `.env.example` to `.env` and edit it. The most useful settings are:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `API_KEY` | None (required, 16+ characters; `run.py up` generates one) | The value expected in the `X-API-Key` header for imports and exports |
+| `REDIS_PASSWORD` | None (required; `run.py up` generates one) | Redis refuses to start without it, and the API connects with it. URL-safe characters only |
 | `API_PORT` | 8000, or the next free port | The API's port on your machine |
 | `POSTGRES_PORT` | Random, localhost only | Postgres's port on your machine, for debugging |
 | `MAX_UPLOAD_BYTES` | 64 MB | The upload size limit |
@@ -194,7 +195,7 @@ Write endpoints (`POST /api/v1/imports` and `POST /api/v1/exports`) need an `X-A
 - **Choose your own** key by setting `API_KEY` in `.env` or the environment. Generate one with `python -c 'import secrets; print(secrets.token_urlsafe(32))'`.
 - **Rotate** a key by changing the value and running `uv run python run.py up` again, which recreates the containers with the new value.
 - **In deployed environments**, supply `API_KEY` from your platform's secret store as an environment variable. Never commit it, and use a different key for each environment.
-- **Upgrading from an older checkout:** an existing `.env` with `API_KEY=dev-api-key` is now too short. Delete that line and `run.py up` generates a new key.
+- **Upgrading from an older checkout:** an existing `.env` with `API_KEY=dev-api-key` is now too short. Delete that line and `run.py up` generates a new key. `run.py up` also adds a `REDIS_PASSWORD` if `.env` doesn't have one.
 
 ## Testing
 

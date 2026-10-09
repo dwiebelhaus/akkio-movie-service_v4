@@ -12,7 +12,7 @@ import binascii
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from app.domain import name_key
+from app.domain import MAX_ID, name_key
 from app.errors import ApiError
 from app.schemas import MovieFilter
 
@@ -66,7 +66,8 @@ def decode_cursor(cursor: str | None) -> int:
         return 0
     try:
         value = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
-        if value.isdigit():
+        # Bounded like path ids (`MAX_ID`), so the keyset condition can use the index.
+        if value.isdigit() and len(value) <= 19 and int(value) <= MAX_ID:
             return int(value)
     except (binascii.Error, UnicodeDecodeError, ValueError):
         pass

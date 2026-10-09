@@ -3,7 +3,7 @@ import asyncio
 from fastapi import APIRouter
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
-from app.dependencies import Hub, Pool, SettingsDep
+from app.dependencies import Hub, IdPath, Pool, SettingsDep
 from app.errors import ApiError
 from app.schemas import ErrorResponse, JobRead
 from app.services import jobs
@@ -24,7 +24,7 @@ async def _load(pool, job_id: int) -> JobRead:
 
 
 @router.get("/jobs/{job_id}", responses={404: {"model": ErrorResponse}})
-async def get_job(job_id: int, pool: Pool) -> JobRead:
+async def get_job(job_id: IdPath, pool: Pool) -> JobRead:
     """Current status snapshot of a job."""
     return await _load(pool, job_id)
 
@@ -38,7 +38,7 @@ async def get_job(job_id: int, pool: Pool) -> JobRead:
         503: {"model": ErrorResponse, "description": "Too many open event streams; retry later"},
     },
 )
-async def job_events(job_id: int, pool: Pool, hub: Hub, settings: SettingsDep) -> EventSourceResponse:
+async def job_events(job_id: IdPath, pool: Pool, hub: Hub, settings: SettingsDep) -> EventSourceResponse:
     """Live progress as server-sent events.
 
     Sends the current state immediately, then an event on every change: `progress` while

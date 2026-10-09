@@ -113,3 +113,49 @@ def test_nul_bytes_are_removed_from_names():
 def test_nul_byte_in_a_number_is_rejected(field):
     with pytest.raises(ValueError, match=f"invalid {field}"):
         Movie.from_csv_row(row(**{field: "5\x00"}))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"movie_name": "x" * 501}, "movie_name longer than 500 characters"),
+        ({"genres": "g" * 65}, "genre name longer than 64 characters"),
+        ({"genres": ",".join(f"G{i}" for i in range(21))}, "more than 20 genres"),
+        # 500 four-byte characters plus genres: within the character limits, over the byte limit.
+        ({"movie_name": "\U0001d538" * 500, "genres": "Drama"}, "movie_name and genres are too long together"),
+    ],
+)
+def test_rows_too_large_for_the_identity_index_are_rejected(overrides, reason):
+    with pytest.raises(ValueError, match=f"^{reason}$"):
+        Movie.from_csv_row(row(**overrides))
+
+
+def test_largest_allowed_row_parses():
+    movie = Movie.from_csv_row(row(movie_name="x" * 500, genres=",".join(f"{i:02d}" + "g" * 62 for i in range(20))))
+    assert len(movie.genres) == 20
+
+
+@pytest.mark.parametrize("field", ["year", "rating"])
+def test_rejection_reasons_quote_at_most_100_characters(field):
+    with pytest.raises(ValueError) as exc:
+        Movie.from_csv_row(row(**{field: "9" * 5000 if field == "year" else "x" * 5000}))
+    assert len(str(exc.value)) < 130
+    assert str(exc.value).endswith("...")
+
+
+@pytest.mark.parametrize(
+    ("raw", "imported"),
+    [
+        ("'=SUM(A1)", "=SUM(A1)"),
+        ("'+1", "+1"),
+        ("'-30-", "-30-"),
+        ("'@home", "@home"),
+        ("''=x", "'=x"),  # a real leading quote survives the round trip
+        ("'Twas the Night", "'Twas the Night"),  # not an escaped formula
+        ("=x", "=x"),
+    ],
+)
+def test_export_formula_escaping_is_removed_on_import(raw, imported):
+    movie = Movie.from_csv_row(row(movie_name=raw, genres=raw))
+    assert movie.movie_name == imported
+    assert movie.genres == (imported,)

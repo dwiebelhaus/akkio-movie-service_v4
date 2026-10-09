@@ -3,7 +3,7 @@ import asyncio
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.dependencies import Hub, Pool, SettingsDep, StorageDep, require_api_key
+from app.dependencies import Hub, IdPath, Pool, SettingsDep, StorageDep, require_api_key
 from app.domain import JobStatus, JobType
 from app.errors import ApiError
 from app.schemas import ErrorResponse, JobRead
@@ -49,7 +49,7 @@ async def create_export(request: Request, response: Response, pool: Pool, hub: H
         410: {"model": ErrorResponse, "description": "Replaced by a newer export"},
     },
 )
-async def download_export(job_id: int, pool: Pool, storage: StorageDep, settings: SettingsDep) -> StreamingResponse:
+async def download_export(job_id: IdPath, pool: Pool, storage: StorageDep, settings: SettingsDep) -> StreamingResponse:
     """Download a finished export (`movie_name,year,genres,rating`, gzip-compressed)."""
     job = await jobs.get_job(pool, job_id)
     if job is None or job["type"] != JobType.EXPORT:
@@ -61,11 +61,19 @@ async def download_export(job_id: int, pool: Pool, storage: StorageDep, settings
         raise ApiError(409, "export_not_ready", "Export is not finished yet", {"status": status.value})
 
     key = export_key(job_id)
+    expired = ApiError(410, "export_expired", "This export was replaced by a newer one; request a new export")
     try:
         file = await asyncio.to_thread(storage.open_read, key)
-        size = await asyncio.to_thread(storage.size, key)
     except FileNotFoundError:
-        raise ApiError(410, "export_expired", "This export was replaced by a newer one; request a new export") from None
+        raise expired from None
+    try:
+        size = await asyncio.to_thread(storage.size, key)
+    except BaseException as exc:
+        # Deleted just after it was opened (a newer export finished).
+        await asyncio.to_thread(file.close)
+        if isinstance(exc, FileNotFoundError):
+            raise expired from None
+        raise
 
     async def body():
         try:

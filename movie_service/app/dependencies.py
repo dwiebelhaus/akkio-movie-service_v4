@@ -1,11 +1,12 @@
 import secrets
 from typing import Annotated
 
-from fastapi import Depends, Request, Security
+from fastapi import Depends, Path, Request, Security
 from fastapi.security import APIKeyHeader
 from psycopg_pool import AsyncConnectionPool
 
 from app.config import Settings, get_settings
+from app.domain import MAX_ID
 from app.errors import ApiError
 from app.services.cache import ResponseCache
 from app.services.job_events import JobEventHub
@@ -39,6 +40,8 @@ Hub = Annotated[JobEventHub, Depends(get_hub)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 Cache = Annotated[ResponseCache, Depends(get_cache)]
 Catalog = Annotated[GenreCatalog, Depends(get_catalog)]
+
+IdPath = Annotated[int, Path(ge=1, le=MAX_ID)]
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 

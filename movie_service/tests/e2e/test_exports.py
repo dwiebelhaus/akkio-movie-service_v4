@@ -132,3 +132,35 @@ def test_download_of_non_export_or_unknown_job_is_404(client, auth_headers):
         resp = client.get(f"/api/v1/exports/{job_id}/file")
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "export_not_found"
+
+
+def test_export_escapes_formulas_and_still_round_trips(client, auth_headers, db):
+    """CSV injection: names starting with = + - @ are exported with a leading `'`, which the
+    importer removes again."""
+    p = unique_prefix()
+    genre = f"-{p.strip()}"
+    rows = [
+        [f"={p}Sum", "2001", genre, ""],
+        [f"''+{p}Quoted", "2001", "Drama", ""],  # an escaped real leading quote: stored as '+...
+        [f"{p}-Inner", "2001", "Drama", ""],  # only a leading character matters
+    ]
+    import_and_wait(client, make_csv(rows), auth_headers)
+    titles = {r[0] for r in db.execute("select title from movies where title like %s", (f"%{p}%",))}
+    assert titles == {f"={p}Sum", f"'+{p}Quoted", f"{p}-Inner"}
+
+    job = export_and_wait(client, auth_headers)
+    content = gzip.decompress(download(client, job["id"])).decode()
+    exported = [r for r in csv.reader(io.StringIO(content)) if p in r[0]]
+    assert sorted(exported) == sorted(
+        [
+            [f"'={p}Sum", "2001", f"'{genre}", ""],
+            [f"''+{p}Quoted", "2001", "Drama", ""],
+            [f"{p}-Inner", "2001", "Drama", ""],
+        ]
+    )
+    for field in (f for r in exported for f in r):
+        assert not field.startswith(("=", "+", "-", "@"))
+
+    again = import_and_wait(client, make_csv(exported), auth_headers)["result"]
+    assert again["inserted"] == again["updated"] == 0
+    assert again["unchanged"] == 3
