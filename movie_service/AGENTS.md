@@ -7,7 +7,7 @@ Guidance for AI coding agents working in this repo.
 FastAPI movie database service (see `README.md` for the full assignment). Requirements:
 
 - Ingest a movie CSV (`movies.csv`) via an upload endpoint.
-- Download the whole dataset as a gzipped CSV.
+- Ability Download the whole dataset as a gzipped CSV.
 - Query by year range and genre(s), returning a list of movies.
 - Progress updates for requests running longer than 2 seconds (real-time updates endpoint).
 - Graded on performance, responsiveness, CPU/memory efficiency, and graceful error handling.
@@ -38,4 +38,7 @@ Run commands from this directory (`movie_service/`).
 - Use Pydantic models for request/response validation; return proper HTTP errors (4xx for bad input, never an unhandled 500).
 - Handle missing values in the data (empty ratings) and malformed rows without crashing.
 - Add dependencies only with `uv add`; commit `pyproject.toml` and `uv.lock` together.
-- The deliverable includes AI work files and a short design-rationale write-up; keep notes on design choices in `README.md` or a `DESIGN.md`.
+- Each requirement should have an end to end test built when reasonable
+- Unhandled exceptions should return 500 http status
+- Follow REST best practices for api design
+
