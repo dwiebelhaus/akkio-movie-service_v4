@@ -32,13 +32,24 @@ class GenreCatalog:
     def __init__(self) -> None:
         self._version: int | None = None
         self._by_name: dict[str, int] = {}
+        self._names: list[str] = []
 
-    async def resolve(self, pool: AsyncConnectionPool, names: list[str], version: int) -> list[int]:
+    async def _load(self, pool: AsyncConnectionPool, version: int) -> None:
         if self._version != version:
             async with pool.connection() as conn:
-                cur = await conn.execute("select id, name from genres")
-                self._by_name = {name.casefold(): gid for gid, name in await cur.fetchall()}
+                cur = await conn.execute("select id, name from genres order by name")
+                rows = await cur.fetchall()
+            self._by_name = {name.casefold(): gid for gid, name in rows}
+            self._names = [name for _, name in rows]
             self._version = version
+
+    async def names(self, pool: AsyncConnectionPool, version: int) -> list[str]:
+        """All genre names, sorted."""
+        await self._load(pool, version)
+        return self._names
+
+    async def resolve(self, pool: AsyncConnectionPool, names: list[str], version: int) -> list[int]:
+        await self._load(pool, version)
         unknown = sorted({n for n in names if n.strip().casefold() not in self._by_name})
         if unknown:
             raise ApiError(422, "unknown_genre", f"Unknown genre(s): {', '.join(unknown)}", {"unknown": unknown})

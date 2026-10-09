@@ -16,7 +16,7 @@ class MovieFilter(BaseModel):
     genre: list[str] = Field(
         default_factory=list,
         max_length=30,
-        description="Repeatable: `?genre=Action&genre=Drama`. Case-insensitive.",
+        description="Repeatable: `?genre=Action&genre=Drama`. Case-insensitive. See `GET /genres`.",
     )
     genre_match: Literal["any", "all"] = Field("any", description="Match any or all of the genres")
     limit: int = Field(50, ge=1, le=1000)

@@ -217,3 +217,21 @@ def test_search_is_fast_on_the_sample(client, params):
         pytest.skip("sample data not imported")
     assert resp.status_code == 200
     assert elapsed < 1.0
+
+
+def test_list_genres(client, catalog):
+    resp = client.get("/api/v1/genres")
+    assert resp.status_code == 200
+    genres = resp.json()
+    assert set(catalog) <= set(genres)
+    assert genres == sorted(genres)
+    assert client.get("/api/v1/genres", headers={"If-None-Match": resp.headers["ETag"]}).status_code == 304
+
+
+def test_openapi_enumerates_genres(client, catalog):
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200
+    params = resp.json()["paths"]["/api/v1/movies"]["get"]["parameters"]
+    (genre,) = [p for p in params if p["name"] == "genre"]
+    assert set(catalog) <= set(genre["schema"]["items"]["enum"])
+    assert client.get("/docs").status_code == 200

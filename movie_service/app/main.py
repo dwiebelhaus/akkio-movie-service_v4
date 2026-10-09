@@ -7,7 +7,7 @@ from app.config import get_settings
 from app.db.migrate import migrate
 from app.db.pool import create_pool
 from app.errors import register_error_handlers
-from app.routers import exports, health, imports, jobs, movies
+from app.routers import docs, exports, genres, health, imports, jobs, movies
 from app.services.cache import ResponseCache
 from app.services.job_events import JobEventHub
 from app.services.movie_search import GenreCatalog
@@ -43,12 +43,18 @@ app = FastAPI(
     title="Movie API",
     version="1.0.0",
     lifespan=lifespan,
+    # Served by `app.routers.docs`, which adds live genre names to the spec.
+    openapi_url=None,
+    docs_url=None,
+    redoc_url=None,
 )
 
 register_error_handlers(app)
 
+app.include_router(docs.router)
 app.include_router(health.router)
 app.include_router(movies.router, prefix=API_PREFIX)
+app.include_router(genres.router, prefix=API_PREFIX)
 app.include_router(imports.router, prefix=API_PREFIX)
 app.include_router(exports.router, prefix=API_PREFIX)
 app.include_router(jobs.router, prefix=API_PREFIX)
