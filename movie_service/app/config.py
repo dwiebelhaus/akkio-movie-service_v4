@@ -4,10 +4,14 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+MIN_API_KEY_LENGTH = 16
+
+
 class Settings(BaseSettings):
     """Service configuration, read from environment variables (and `.env` if present)."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # hide_input_in_errors: a rejected API_KEY must not be echoed into the logs.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     database_url: str = "postgresql://movies:movies@localhost:5432/movies"
     db_pool_min_size: int = Field(default=1, ge=1)
@@ -17,7 +21,8 @@ class Settings(BaseSettings):
     # Workers run bulk merges and exports, which legitimately take longer.
     worker_statement_timeout_ms: int = Field(default=30 * 60 * 1000, ge=0)
 
-    api_key: SecretStr = SecretStr("dev-api-key")
+    # Required, with no default, so a deployment can't silently run with a well-known key.
+    api_key: SecretStr = Field(min_length=MIN_API_KEY_LENGTH)
     # Sized for ~750k movies (DESIGN.md §8).
     max_upload_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
     data_dir: str = "/data"

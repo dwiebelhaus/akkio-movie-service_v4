@@ -92,18 +92,20 @@ def test_bad_rows_are_skipped_and_reported(client, auth_headers):
             [f"{p}Out of range", "1999", "Drama", "11"],
             [f"{p}Too many", "1999", "Drama", "5.0", "extra"],
             [f"{p}No rating", "2000", "", ""],
+            [f"{p}Nul\x00byte", "2000", "Drama", "5.0"],
         ]
     )
     job = import_and_wait(client, content, auth_headers)
     result = job["result"]
     assert result["inserted"] == 2
-    assert result["rejected"] == 5
+    assert result["rejected"] == 6
     reasons = {s["line"]: s["reason"] for s in result["rejected_samples"]}
     assert reasons[3].startswith("invalid rating")
     assert reasons[4] == "missing movie_name"
     assert reasons[5].startswith("invalid year")
     assert reasons[6].startswith("rating out of range")
     assert reasons[7] == "expected 4 fields, got 5"
+    assert reasons[9] == "field contains a NUL byte"
 
 
 def test_columns_in_any_order_and_extras_ignored(client, auth_headers):

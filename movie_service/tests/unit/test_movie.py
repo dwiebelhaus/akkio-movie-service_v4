@@ -69,3 +69,9 @@ def test_every_sample_row_parses():
     with (Path(__file__).resolve().parents[2] / "movies.csv").open(newline="") as f:
         for r in csv.DictReader(f):
             Movie.from_csv_row(r)
+
+
+@pytest.mark.parametrize("field", ["movie_name", "year", "genres", "rating"])
+def test_nul_byte_in_any_field_is_rejected(field):
+    with pytest.raises(ValueError, match="NUL byte"):
+        Movie.from_csv_row(row(**{field: "a\x00b"}))

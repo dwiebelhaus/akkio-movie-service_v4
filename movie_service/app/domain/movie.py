@@ -37,6 +37,10 @@ class Movie:
         Missing year or rating become None. Raises ValueError with a short reason if the
         row is malformed.
         """
+        # Postgres text can't hold NUL; letting one through would fail the whole import.
+        if any("\x00" in value for value in row.values() if value):
+            raise ValueError("field contains a NUL byte")
+
         title = " ".join((row.get("movie_name") or "").split())
         if not title:
             raise ValueError("missing movie_name")
