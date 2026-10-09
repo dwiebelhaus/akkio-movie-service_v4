@@ -1,6 +1,6 @@
 from typing import Any
 from fastapi import APIRouter
-from app.model import MoviesQuery
+from app.schemas import MoviesQuery
 
 router = APIRouter()
 

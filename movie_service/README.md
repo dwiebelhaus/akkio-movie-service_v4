@@ -46,7 +46,7 @@ Install `uv` and run `uv sync`
 Run the following command at root directory (this will also install dependency)
 
 ```bash
-uv run fastapi dev main.py
+uv run fastapi dev
 ```
 
 ### Add dependencies
